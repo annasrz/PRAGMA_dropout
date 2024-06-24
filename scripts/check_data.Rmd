@@ -51,13 +51,13 @@ if (!file.exists(folder_plot)) {
 print(getwd())
 datapath <- file.path("..", "input") #at least monthly users in GER
 #read in all files in datapath 
-filenames <- list.files(datapath, full.names = T)
+filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 
 #save all files as separate dataframes
 ldf <- lapply(filenames, readRDS)
 names(ldf) <- gsub(".rds", "", basename(filenames))
 print(names(ldf))
-names <- c("pragma_id_GKV", "diagnoses", "medications", "employment", "income", "inpat", "qwt")
+names <- c("pragma_id_GKV", "diagnoses", "medications", "employment", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt")
 names(ldf) <- names
 #check if all dataframes are loaded
 ls()
@@ -119,6 +119,28 @@ ENTL_ndays
 ggsave(file.path(folder_plot, "ENTL_ndays.png"), ENTL_ndays, width = 10, height = 6)
 
 ```
+
+Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur sehr kurz dauern. Außerdem gibt es eine zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche, obwohl eigentlich 21 Tage empfohlen werden. Die ENTL301-Variable scheint daher kein idealer Indikator für einen unplanmäßigen Behandlungsabbruch zu sein.
+
+Als alternative Operationalisierung der AV unplanmäßger Beendigung des Aufenthalts schauen wir uns daher die Anzahl der Tage in Behandlung an. 
+
+# Hinzufügen der OPS Codes
+```{r OPS_codes}
+#show rows that have the same KH_FALL_ID
+qwt_duplicates <- qwt %>% 
+  group_by(KH_FALL_ID, pragmaid) %>% 
+  filter(n() > 1) #es gibt einige Personen, die innerhalb eines KH Aufenthalts mehrere Rehas gemacht haben
+
+#rename ops.date to date.qwt.start
+qwt_OPS <- qwt_OPS %>% 
+  filter(grepl("^8-985|^8985|^9-647|^9647", OPS)) %>%
+  rename(date.qwt.start = date.ops) %>%
+  mutate(date.qwt.start = as.Date(date.qwt.start))
+
+qwt_full <- left_join(qwt, qwt_OPS, by = c("KH_FALL_ID", "pragmaid", "gkv", "date.qwt.start"))
+
+```
+
 # Hinzufügen der Stammdaten 
 ```{r add_stammdaten}
 #match pragma_id_GKV with qwt based on pragma_id (only columns names sex and yob)
@@ -129,8 +151,6 @@ total <- total %>%
   mutate(age= as.integer(substr(date.qwt.start, 1, 4)) - yob)
 
 total$pragmaid <- factor(total$pragmaid)
-
-
 ```
 
 # Aufstellen eines Modells zur Vorhersage von unpl_drop
