@@ -61,11 +61,15 @@ names <- c("pragma_id_GKV", "diagnoses", "medications", "employment", "income", 
 names(ldf) <- names
 #check if all dataframes are loaded
 ls()
-list2env(ldf, envir = .GlobalEnv)
+list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
 rm(ldf)
 ```
+
 # Daten vorbereiten
 
+## Outcome Variablen Definition? 
+
+### ENTLASS301
 ```{r recode_ENTL}
 table(qwt$ENTL301)
 str(qwt$ENTL301)
@@ -75,16 +79,20 @@ qwt$ENTL301 <- factor(qwt$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 14, 1
 #was passiert nach interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG?
 ```
 
-```{r check_data}
+### Validierung der ENTLASS301 Variable an Behandlungsdauer
+
+```{r check_ENTL301}
 prop.table(table(qwt$ENTL301))
 str(qwt$ENTL301)
 ggplot(qwt, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
+#add Anzahl Tage in Behandlung
 qwt <- qwt %>% 
   mutate(n_days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")))
 
 ```
-```{r}
+
+```{r ETNL301_ndays_dist}
 prop.table(table(qwt$ENTL301))
 str(qwt$ENTL301)
 ggplot(qwt, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
@@ -122,22 +130,58 @@ ggsave(file.path(folder_plot, "ENTL_ndays.png"), ENTL_ndays, width = 10, height 
 
 Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur sehr kurz dauern. Außerdem gibt es eine zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche, obwohl eigentlich 21 Tage empfohlen werden. Die ENTL301-Variable scheint daher kein idealer Indikator für einen unplanmäßigen Behandlungsabbruch zu sein.
 
-Als alternative Operationalisierung der AV unplanmäßger Beendigung des Aufenthalts schauen wir uns daher die Anzahl der Tage in Behandlung an. 
+Als alternative Operationalisierung der AV Behandlungserfolg (vorher: unplanmäßger Beendigung) des Aufenthalts ziehen wir daher stattdessen die Anzahl der Tage in Behandlung an. Die Behandlungsdauer teilen wir in drei Gruppen ein: 0-6 Tage (unter Mindestaufenthalt), 7-20 Tage (Mindestaufenthalt absolviert, aber unter empfohlener Dauer) und 21+ Tage (empfohlene Dauer). 
+
+### Behandlungsdauer als AV
+```{r create vars}
+qwt <- qwt %>%
+  mutate(treat_dur_cat = factor(case_when(
+  #more than or 20 days in treatment
+  n_days >= 20 ~ 3,
+  #between 7 and 19 days (inclusive)
+  n_days >= 7 & n_days < 20 ~ 2,
+  #between 0 and 6 days (inclusive)
+  n_days >= 0 & n_days < 7 ~ 1,
+  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("0-6 Tage","7-19 Tage", "20+ Tage")))
+
+qwt <- qwt %>%
+  mutate(treat_dur_bin = factor(case_when(
+  #more than or 20 days in treatment
+  n_days >= 20 ~ 2,
+  #below 20 days (inclusive)
+  n_days < 20 ~ 1,
+  TRUE ~ NA_real_), levels = c(1, 2), labels = c("unter 20 Tage", "20+ Tage")))
+
+```
+
+### Validierung der Behandlungsdauer als AV
+```{r check_treat_dur}
+prop.table(table(qwt$treat_dur_cat))
+ggplot(qwt, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
+
+summary(qwt$n_days)
+ggplot(qwt, aes(x = n_days)) +
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous(limits = c(0, 30), breaks = seq(0, 30, by = 2), labels = seq(0, 30, by = 2)) 
+#  scale_x_continuous(limits = c(0, 27)) 
+
+```
+
 
 # Hinzufügen der OPS Codes
 ```{r OPS_codes}
 #show rows that have the same KH_FALL_ID
-qwt_duplicates <- qwt %>% 
-  group_by(KH_FALL_ID, pragmaid) %>% 
-  filter(n() > 1) #es gibt einige Personen, die innerhalb eines KH Aufenthalts mehrere Rehas gemacht haben
+#qwt_duplicates <- qwt %>% 
+#  group_by(KH_FALL_ID, pragmaid) %>% 
+#  filter(n() > 1) #es gibt einige Personen, die innerhalb eines KH Aufenthalts mehrere Rehas gemacht haben
 
 #rename ops.date to date.qwt.start
-qwt_OPS <- qwt_OPS %>% 
-  filter(grepl("^8-985|^8985|^9-647|^9647", OPS)) %>%
-  rename(date.qwt.start = date.ops) %>%
-  mutate(date.qwt.start = as.Date(date.qwt.start))
+#qwt_OPS <- qwt_OPS %>% 
+#  filter(grepl("^8-985|^8985|^9-647|^9647", OPS)) %>%
+#  rename(date.qwt.start = date.ops) %>%
+#  mutate(date.qwt.start = as.Date(date.qwt.start))
 
-qwt_full <- left_join(qwt, qwt_OPS, by = c("KH_FALL_ID", "pragmaid", "gkv", "date.qwt.start"))
+#qwt_full <- left_join(qwt, qwt_OPS, by = c("KH_FALL_ID", "pragmaid", "gkv", "date.qwt.start"))
 
 ```
 
@@ -156,9 +200,15 @@ total$pragmaid <- factor(total$pragmaid)
 # Aufstellen eines Modells zur Vorhersage von unpl_drop
 ```{r model}
 #work in progress
-model <- glmmTMB(unpl_drop ~ sex + age + qwt_id + (1|pragmaid), data = total, family = binomial)
+model <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + (1|pragmaid), data = total, family = binomial)
 summary(model)
 ```
+# Interpretation der festen Effekte
 
-# -0.936 (Intercept) ist geschätzt als log odds für abgebrochene Behandlung bei einer Frau, die 0 Jahre alt ist und ihre erste QWT hat.
-# der Koeffizient für männlich ist 0.37, was bedeutet, dass Männer eher abbrechen als Frauen.
+- 0.56 (Intercept) ist geschätzt als log odds für eine Behandlungsdauer von mind. 20 Tagen bei einer Frau, die 0 Jahre alt ist und ihre 0. QWT hat -> Log Odds negativ -> Behandlungen von mind. 20 Tagen sind unwahrscheinlicher als unter 20 Tagen
+
+Negativer Koeffizienten für Geschlecht:männlich -> Männer haben eine geringere Wahrscheinlichkeit für Behandlungen von mind. 20 Tagen als Frauen
+
+negativer Koeffizient für QWT_ID -> mit fortlaufender QWT_ID sinkt die Wahrscheinlichkeit für Behandlungen von mind. 20 Tagen, d. h., ein höherer `qwt_id`-Wert erhöht die Wahrscheinlichkeit für kürzere Aufenthalte.
+
+Die Varianz des Interzepts für die zufälligen Effekte beträgt 0.3541. Das bedeutet, dass es eine gewisse Streuung zwischen den Patient:innen gibt, die nicht durch die festen Effekte erklärt wird.
