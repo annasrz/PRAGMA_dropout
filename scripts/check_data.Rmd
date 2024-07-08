@@ -6,6 +6,14 @@ output:
   html_document:
     code_folding: hide
 ---
+# To-Dos
+
+- VIF von Prädiktoren berechnen
+- Gleiche Analyse für INPAT
+- Prädiktor Polymedikation bilden
+- Prädiktor Komorbidität ggf ändern?
+- Prädiktor Pflegegrad aufnehmen
+
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -16,7 +24,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB")
+packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -188,20 +196,130 @@ ggplot(qwt, aes(x = n_days)) +
 # Hinzufügen der Stammdaten 
 ```{r add_stammdaten}
 #match pragma_id_GKV with qwt based on pragma_id (only columns names sex and yob)
-total <- left_join(qwt, pragma_id_GKV, by="pragmaid")
+total_stamm <- left_join(qwt, pragma_id_GKV, by=c("pragmaid", "gkv"))
 
-total <- total %>% 
-  select(c(-gkv.y, -hivid, -gkv.id, -dak.id, -aok.id)) %>%
-  mutate(age= as.integer(substr(date.qwt.start, 1, 4)) - yob)
+total_stamm <- total_stamm %>% 
+  select(c(-hivid, -gkv.id, -dak.id, -aok.id)) %>%
+  mutate(age = as.integer(substr(date.qwt.start, 1, 4)) - yob)
 
-total$pragmaid <- factor(total$pragmaid)
+total_stamm$pragmaid <- factor(total_stamm$pragmaid)
+```
+
+# Hinzufügen Emplyoment Status
+```{r add_employment}
+#NAs?
+sum(is.na(employment$date.emp.start)) # 0
+sum(is.na(employment$date.emp.end)) # 0
+
+total_employ_all <- left_join(total_stamm, employment, by = c("pragmaid", "gkv"))
+sum(is.na(total_employ_all$date.emp.start)) # 0
+sum(is.na(total_employ_all$date.emp.end)) # 0
+# Filtern der Zeilen, sodass qwt_start innerhalb des Zeitraums von employ_start und employ_end liegt
+total_employ <- total_employ_all %>%
+  filter(date.qwt.start >= date.emp.start & date.qwt.start <= date.emp.end)
+
+nrow(total_employ) - nrow(total_stamm) 
+#after the filter, there are 42 rows less than before
+missing_rows <- total_stamm %>%
+  anti_join(total_employ, by = c("pragmaid", "date.qwt.start", "date.qwt.end")) #für 42 Zeilen gibt es keine employment Daten (-> Lücken in den Daten)
+
+#add 42 missing rows to result and set employment status to NA
+total_employ <- rbind(total_employ, missing_rows %>% mutate(emp.type = NA_character_), fill = T)
+
+total_employ$emp.type <- as.factor(total_employ$emp.type)
+total_employ$sex <- as.factor(total_employ$sex)
+total_employ$nationality <- as.factor(total_employ$nationality)
+total_employ$ward <- as.factor(total_employ$ward)
+total_employ$source <- as.factor(total_employ$source)
+
+```
+# Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
+```{r check_missing_employment}
+#check if missing employment data is due to interruptions in insured periods
+check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
+  select(pragmaid, date.qwt.start, date.qwt.end, date.ins.start, date.ins.end, gkv.x, gkv.y) 
+
+#QWT Zeitraum liegt tatsächlich außerhalb des Versichertenzeitraums, daher fehlen auch die Employment Daten. Wieso? 
+``` 
+# Hinzufügen von Diagnose-Daten
+
+```{r add_diagnoses}
+sum(is.na(diagnoses$pragmaid)) #158
+
+diagnoses_filtered <- diagnoses %>% 
+  filter(pragmaid %in% total_employ$pragmaid) #keep only rows that are also in total_employ
+
+nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid))
+
+table(diagnoses_filtered$icd_type)
+
+diagnoses_filtered <- diagnoses_filtered %>% 
+  filter(icd_type %in% c("confirmed", "primary", "secondary")) %>%
+  mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
+
+nrow(distinct(diagnoses_filtered, pragmaid))
+
+summary(diagnoses_filtered$length_diag) #length of the diagnoses varies a lot, some are only one day long, not useful?
+
+#delete length_diag
+diagnoses_filtered <- select(diagnoses_filtered, -length_diag)
+
+sum(is.na(diagnoses_filtered$date.diag.start)) #20
+sum(is.na(diagnoses_filtered$date.diag.end)) #20
+
+
+#add diagnoses to total_employ
+total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
+  select(-icd_type) %>% #remove duplicate column
+  filter(date.diag.start <= date.qwt.start & 
+    date.diag.end >= date.qwt.end - months(1)) %>%
+  distinct() #remove duplicates
+
+nrow(distinct(total_employ, pragmaid)) - nrow(distinct(total_diag_all, pragmaid)) #11 patients do not have any diagnoses that fulfill the criteria
+nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(total_diag_all, pragmaid, qwt_id)) # 57 patient - QWT combinations do not have any diagnoses that fulfill the criteria
+
+
+#calculate number of diagnoses per patient and QWT number
+diag_sum <- total_diag_all %>%
+  filter(icd.alc == "FALSE") %>%
+  distinct(pragmaid, qwt_id, icd) %>%  # removes duplicate diagnoses based on 'icd'
+  group_by(pragmaid, qwt_id) %>%
+  summarize(n_diagnoses_woa = n())
+
+nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(diag_sum, pragmaid, qwt_id))
+# 99 patients - QWT combinations do not have any diagnoses that fulfill the criteria
+
+total_diag <- left_join(total_employ, diag_sum, by = c("pragmaid", "qwt_id"))
+
+#are there missings? 
+nrow(total_employ) - nrow(total_diag) #0
+sum(is.na(total_diag$n_diagnoses_woa)) #99 missings in n_diagnoses_woa
+#replace missings with 0
+total_diag$n_diagnoses_woa[is.na(total_diag$n_diagnoses_woa)] <- 0
+```
+```{r check_ndiagnoses}
+#plot histogram of number of diagnoses
+ggplot(total_diag, aes(x = n_diagnoses_woa)) + geom_histogram(binwidth = 1)
+```
+
+
+```{r gkv_check}
+#are there pragmaids that have different values in gkv?
+total_diag %>% 
+  group_by(pragmaid) %>% 
+  filter(n_distinct(gkv) > 1)
+# no different gkvs for the same pragmaid
 ```
 
 # Aufstellen eines Modells zur Vorhersage von unpl_drop
 ```{r model}
 #work in progress
-model <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + (1|pragmaid), data = total, family = binomial)
-summary(model)
+model1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + n_diagnoses_woa + (1|gkv/pragmaid), data = total_diag, family = binomial)
+summary(model1)
+
+#model2 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + (1|pragmaid) + (1|gkv), data = #total_diag, family = binomial)
+#summary(model2)
+# exakt das gleiche Ergebnis wie model1
 ```
 # Interpretation der festen Effekte
 
@@ -211,4 +329,8 @@ Negativer Koeffizienten für Geschlecht:männlich -> Männer haben eine geringer
 
 negativer Koeffizient für QWT_ID -> mit fortlaufender QWT_ID sinkt die Wahrscheinlichkeit für Behandlungen von mind. 20 Tagen, d. h., ein höherer `qwt_id`-Wert erhöht die Wahrscheinlichkeit für kürzere Aufenthalte.
 
-Die Varianz des Interzepts für die zufälligen Effekte beträgt 0.3541. Das bedeutet, dass es eine gewisse Streuung zwischen den Patient:innen gibt, die nicht durch die festen Effekte erklärt wird.
+Negativer Koeffizienten für emp.type:unemployed -> Arbeitslosigkeit senkt Wahrscheinlichkeit für Behandlungen von mind. 20 Tagen im Vergleich zu bestehendem Arbeitsverhältnis
+
+Negativer Koeffizienten für n_diagnoses_wo -> es scheint so als ob Wahrscheinlichkeit für Behandlungen von mind. 20 Tagen sinkt, wenn Anzahl der Diagnosen steigt -> **wird der potenzielle Einfluss von einer bestimmten Diagnose getrieben?**
+
+Die Varianz des Interzepts für die zufälligen Effekte beträgt 0.33. Das bedeutet, dass es eine gewisse Streuung zwischen den Patient:innen gibt, die nicht durch die festen Effekte erklärt wird.
