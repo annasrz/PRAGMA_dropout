@@ -10,8 +10,10 @@ output:
 
 - VIF von Prädiktoren berechnen
 - Gleiche Analyse für INPAT
+- Gleiche Analyse für REHA
+- Komplette Analyse in ein Modell
 - Prädiktor Polymedikation bilden
-- Prädiktor Komorbidität ggf ändern?
+- Prädiktor Komorbidität ggf ändern? Elixhauser?
 - Prädiktor Pflegegrad aufnehmen
 
 
@@ -65,7 +67,7 @@ filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 ldf <- lapply(filenames, readRDS)
 names(ldf) <- gsub(".rds", "", basename(filenames))
 print(names(ldf))
-names <- c("pragma_id_GKV", "diagnoses", "medications", "employment", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt")
+names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha")
 names(ldf) <- names
 #check if all dataframes are loaded
 ls()
@@ -211,6 +213,7 @@ total_stamm$pragmaid <- factor(total_stamm$pragmaid)
 sum(is.na(employment$date.emp.start)) # 0
 sum(is.na(employment$date.emp.end)) # 0
 
+nrow(distinct(total_stamm, pragmaid, qwt_id)) #3857
 total_employ_all <- left_join(total_stamm, employment, by = c("pragmaid", "gkv"))
 sum(is.na(total_employ_all$date.emp.start)) # 0
 sum(is.na(total_employ_all$date.emp.end)) # 0
@@ -221,10 +224,7 @@ total_employ <- total_employ_all %>%
 nrow(total_employ) - nrow(total_stamm) 
 #after the filter, there are 42 rows less than before
 missing_rows <- total_stamm %>%
-  anti_join(total_employ, by = c("pragmaid", "date.qwt.start", "date.qwt.end")) #für 42 Zeilen gibt es keine employment Daten (-> Lücken in den Daten)
-
-#add 42 missing rows to result and set employment status to NA
-total_employ <- rbind(total_employ, missing_rows %>% mutate(emp.type = NA_character_), fill = T)
+  anti_join(total_employ, by = c("pragmaid", "date.qwt.start", "date.qwt.end")) #für 42 Zeilen gibt es keine employment Daten (-> Lücken in den Daten, siehe unten), diese werden exkludiert (aktiver Versichertenstatus ist Inklusionskriterium)
 
 total_employ$emp.type <- as.factor(total_employ$emp.type)
 total_employ$sex <- as.factor(total_employ$sex)
@@ -236,71 +236,182 @@ total_employ$source <- as.factor(total_employ$source)
 # Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
 ```{r check_missing_employment}
 #check if missing employment data is due to interruptions in insured periods
-check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
-  select(pragmaid, date.qwt.start, date.qwt.end, date.ins.start, date.ins.end, gkv.x, gkv.y) 
+check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid", "gkv")) %>%
+  select(pragmaid, date.qwt.start, date.qwt.end, date.ins.start, date.ins.end, gkv) 
 
 #QWT Zeitraum liegt tatsächlich außerhalb des Versichertenzeitraums, daher fehlen auch die Employment Daten. Wieso? 
 ``` 
 # Hinzufügen von Diagnose-Daten
 
 ```{r add_diagnoses}
-sum(is.na(diagnoses$pragmaid)) #158
+sum(is.na(all_diagnoses$pragmaid)) #158
 
-diagnoses_filtered <- diagnoses %>% 
+diagnoses_filtered <- all_diagnoses %>% 
   filter(pragmaid %in% total_employ$pragmaid) #keep only rows that are also in total_employ
 
-nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid))
+nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid)) #0, all patients have diagnoses
 
 table(diagnoses_filtered$icd_type)
 
 diagnoses_filtered <- diagnoses_filtered %>% 
-  filter(icd_type %in% c("confirmed", "primary", "secondary")) %>%
+  filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
   mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
 
-nrow(distinct(diagnoses_filtered, pragmaid))
+nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid)) #0, all patients have diagnoses that fulfill the criteria
 
-summary(diagnoses_filtered$length_diag) #length of the diagnoses varies a lot, some are only one day long, not useful?
+summary(diagnoses_filtered$length_diag)
+#plot histogram of length_diag
+ggplot(diagnoses_filtered, aes(x = length_diag)) + geom_histogram(binwidth = 1) +
+  facet_wrap(~setting) +
+  scale_x_continuous(limits = c(0, 100))
+
+#show cases with NA in length_diag
+diagnoses_filtered %>% 
+  filter(is.na(length_diag)) %>%
+  select(pragmaid, icd, icd_type, setting, date.diag.start, date.diag.end)
 
 #delete length_diag
 diagnoses_filtered <- select(diagnoses_filtered, -length_diag)
 
 sum(is.na(diagnoses_filtered$date.diag.start)) #20
-sum(is.na(diagnoses_filtered$date.diag.end)) #20
+sum(is.na(diagnoses_filtered$date.diag.end)) #17
+sum(is.na(diagnoses_filtered$setting)) #0
+sum(is.na(total_employ$date.qwt.start)) #0
+sum(is.na(total_employ$date.qwt.end)) #0
+
+#if date.diag.end is NA, set it to date.diag.start
+#diagnoses_filtered <- diagnoses_filtered %>% 
+#  mutate(date.diag.end = ifelse(is.na(date.diag.end), date.diag.start, date.diag.end))
+#if date.diag.start is NA, set it to date.diag.end
+#diagnoses_filtered <- diagnoses_filtered %>% 
+#  mutate(date.diag.start = ifelse(is.na(date.diag.start), date.diag.end, date.diag.start))
+
+#add diagnoses to total_employ and filter for diagnoses according to time criteria and exclude alcohol diagnoses
+#total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
+#  filter(
+#    (date.diag.start <= date.qwt.start & date.diag.end >= (date.qwt.end - months(1))) |  # Diagnosestart muss vor oder gleich QWT-Start liegen und Diagnose muss noch bis mindestens 1 Monat vor QWT-Ende laufen
+#    (is.na(date.diag.end) & date.diag.start >= (date.qwt.start - months(1)) & date.diag.start <= #date.qwt.start) |  # Falls date.diag.end NA ist, darf date.diag.start nur bis zu einem Monat vor QWT-Start und maximal gleich QWT-Start liegen
+#    (is.na(date.diag.start) & date.diag.end >= (date.qwt.end - months(1)) & date.diag.end <= (date.qwt.end + weeks(1)))  # Falls date.diag.start NA ist, darf date.diag.end nur bis zu einem Monat vor und eine Woche nach QWT-Ende liegen
+#  ) %>%
+#  filter(icd.alc == "FALSE") %>%
+#  distinct(pragmaid, qwt_id, icd, .keep_all = TRUE)
+
+#neues Zeitfenster für Diagnosen
+total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) 
+nrow(distinct(total_diag_all, pragmaid, qwt_id)) #3815
+
+total_diag_all_filtered <- total_diag_all %>%
+  filter(
+    #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
+     date.diag.start >= (date.qwt.start - days(180)) & date.diag.start <= date.qwt.start)
+#Arbeitsdefinition, für stationäre Diagnosen (bzw. alle anderen settings) muss Eingrenzung noch angepasst werden
+  
+
+nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) #3815
+
+nrow(distinct(total_diag_all, pragmaid, qwt_id)) - nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) #0
+
+check_missing_diag <- total_diag_all %>% 
+  anti_join(total_diag_all_filtered, by = c("pragmaid", "qwt_id", "icd", "date.diag.start", "date.diag.end", "setting", "icd.alc")) %>%
+  select(pragmaid, qwt_id, icd, date.diag.start, date.diag.end, date.qwt.start, date.qwt.end, setting) # -> okay
+
+#----------------------------------------------
+# Testen mit einem kleinen Beispiel-Datensatz
+test_df <- data.frame(
+  pragmaid = 1:6,
+  gkv = c("aok", "aok", "dak", "dak", "dak", "aok"),
+  date.qwt.start = as.Date(c('2021-01-01', '2021-06-01', '2021-07-01', '2021-10-01', '2022-01-01', '2022-04-01')),
+  setting = c("outpatient", "inpatient", "outpatient", "inpatient", "outpatient", "outpatient"),
+  date.diag.start = as.Date(c('2019-07-01', '2020-11-01', '2021-03-01', '2021-09-01', '2021-11-01', '2022-01-01')),
+  qwt_id = 1:6,
+  icd = c("A", "B", "C", "D", "E", "F")
+)
+
+result <- test_df %>%
+  mutate(test_column = case_when(
+    (setting == "outpatient" & date.diag.start >= (date.qwt.start - months(6)) & date.diag.start <= date.qwt.start) |
+    (setting != "outpatient" & date.diag.start >= (date.qwt.start - months(6)) & date.diag.start <= date.qwt.start) ~ 1,
+    TRUE ~ 0
+  ))
+#----------------------------------------------
+
+nrow(distinct(total_employ, pragmaid)) - nrow(distinct(total_diag_all_filtered, pragmaid)) #0 patients do not have any diagnoses that fulfill the criteria -> die Berücksichtigung von NAs in Filterung ändert hier nichts
+nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) # 0 patient - QWT combinations do not have any diagnoses that fulfill the criteria -> die Berücksichtigung von NAs in Filterung ändert hier nichts
 
 
-#add diagnoses to total_employ
-total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
-  select(-icd_type) %>% #remove duplicate column
-  filter(date.diag.start <= date.qwt.start & 
-    date.diag.end >= date.qwt.end - months(1)) %>%
-  distinct() #remove duplicates
+total_diag_all_filtered$id_pragma_qwt <- paste(total_diag_all_filtered$pragmaid, total_diag_all_filtered$qwt_id, sep = "_")
 
-nrow(distinct(total_employ, pragmaid)) - nrow(distinct(total_diag_all, pragmaid)) #11 patients do not have any diagnoses that fulfill the criteria
-nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(total_diag_all, pragmaid, qwt_id)) # 57 patient - QWT combinations do not have any diagnoses that fulfill the criteria
+comorb <- comorbidity::comorbidity(x=total_diag_all_filtered, id = "id_pragma_qwt",
+                                code = "icd",map="elixhauser_icd10_quan",
+                                assign0 = T,tidy.codes = T)
 
+comorb <- comorb %>%
+  #new column with row sums using all columns except the first one and "alcohol"
+  mutate(elix_sum = rowSums(select(., -1, -alcohol))) %>%
+  select(id_pragma_qwt, elix_sum)
+        
 
-#calculate number of diagnoses per patient and QWT number
-diag_sum <- total_diag_all %>%
-  filter(icd.alc == "FALSE") %>%
-  distinct(pragmaid, qwt_id, icd) %>%  # removes duplicate diagnoses based on 'icd'
-  group_by(pragmaid, qwt_id) %>%
-  summarize(n_diagnoses_woa = n())
+nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(comorb, id_pragma_qwt))
+# 0 patients - QWT combinations do not have any diagnoses that fulfill the criteria
+total_employ$id_pragma_qwt <- paste(total_employ$pragmaid, total_employ$qwt_id, sep = "_")
 
-nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(diag_sum, pragmaid, qwt_id))
-# 99 patients - QWT combinations do not have any diagnoses that fulfill the criteria
-
-total_diag <- left_join(total_employ, diag_sum, by = c("pragmaid", "qwt_id"))
+total_diag <- left_join(total_employ, comorb, by = "id_pragma_qwt")
 
 #are there missings? 
 nrow(total_employ) - nrow(total_diag) #0
-sum(is.na(total_diag$n_diagnoses_woa)) #99 missings in n_diagnoses_woa
-#replace missings with 0
-total_diag$n_diagnoses_woa[is.na(total_diag$n_diagnoses_woa)] <- 0
+sum(is.na(total_diag$elix_sum)) #0 missings in n_diagnoses_woa
 ```
+
 ```{r check_ndiagnoses}
 #plot histogram of number of diagnoses
-ggplot(total_diag, aes(x = n_diagnoses_woa)) + geom_histogram(binwidth = 1)
+ggplot(total_diag, aes(x = elix_sum)) + geom_histogram(binwidth = 1)
+summary(total_diag$elix_sum)
 ```
+# Hinzufügen von Pflegegraden
+```{r add_pflegegrad}
+str(fosterage)
+table(fosterage$fost.degree, useNA = "always")
+# sowohl Pflegegrade (PG) als auch Pflegestufen (PS). Pflegegrade sind ab 2017 gültig, Pflegestufen bis 2016. Wie Pflegestufen in Pflegegrade umrechnen?
+min(qwt$date.qwt.start) #2015-12-11
+
+unique(qwt$date.qwt.start) %>% sort() #5 QWTs wurden vor 2016 begonnen
+
+#Quelle: https://www.gkv-spitzenverband.de/media/dokumente/service_1/Pflegebegutachtung_2017_von_Pflegestufen_zu_Pflegegraden.pdf
+# ohne PEA funktioniert Umrechnung nicht eindeutig. Daher wird die Variable zu Pflegebedarf vorhanden/nicht vorhanden kodiert
+
+#conversion_table_PSPG <- c("PS0" = "PG2",
+#                      "PS1" = "PG2",
+#                      "PS2" = "PG3",
+#                      "PS3" = "PG4",
+#                      "PSH" = "PG5")
+
+#fosterage <- fosterage %>% 
+#  mutate(fost.degree = recode(fost.degree, !!!conversion_table))
+
+fost_filtered <- fosterage %>% 
+  filter(pragmaid %in% total_diag$pragmaid)
+
+nrow(distinct(total_diag, pragmaid)) - nrow(distinct(fost_filtered, pragmaid))
+#1675 patients do not have fosterage data
+#248 patients have fosterage data
+total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
+  filter(
+    (date.diag.start <= date.qwt.start & date.diag.end >= (date.qwt.end - months(1))) |  # Diagnosestart muss vor oder gleich QWT-Start liegen und Diagnose muss noch bis mindestens 1 Monat vor QWT-Ende laufen
+    (is.na(date.diag.end) & date.diag.start >= (date.qwt.start - months(1)) & date.diag.start <= date.qwt.start) |  # Falls date.diag.end NA ist, darf date.diag.start nur bis zu einem Monat vor QWT-Start und maximal gleich QWT-Start liegen
+    (is.na(date.diag.start) & date.diag.end >= (date.qwt.end - months(1)) & date.diag.end <= (date.qwt.end + weeks(1)))  # Falls date.diag.start NA ist, darf date.diag.end nur bis zu einem Monat vor und eine Woche nach QWT-Ende liegen
+  ) %>%
+  filter(icd.alc == "FALSE") %>%
+  distinct(pragmaid, qwt_id, icd, .keep_all = TRUE)
+
+#if pragmaid from total_diag is in fosterage and the respective QWT is within the fosterage period, add fosterage to total_diag. if not, set fosterage to NA
+total_fost <- left_join(total_diag, fosterage, by = c("pragmaid", "gkv")) %>%
+  filter(date.qwt.start >= date.fost.start & (is.na(date.fost.end) | date.qwt.start <= date.fost.end))
+
+
+total_fost$fost.degree <- as.factor(total_fost$fost.degree)
+table(total_fost$fost.degree, useNA = "always")
+
+```  
 
 
 ```{r gkv_check}
@@ -314,8 +425,11 @@ total_diag %>%
 # Aufstellen eines Modells zur Vorhersage von unpl_drop
 ```{r model}
 #work in progress
-model1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + n_diagnoses_woa + (1|gkv/pragmaid), data = total_diag, family = binomial)
+model1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + (1|gkv/pragmaid), data = total_diag, family = binomial)
 summary(model1)
+
+#AIC 3783.3
+#Verleich 180 Tage Look back window und 90 Tage und 364: 180 Tage hat besseres AIC (3783.3 vs. 3784.3 vs. 3784.2)
 
 #model2 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + (1|pragmaid) + (1|gkv), data = #total_diag, family = binomial)
 #summary(model2)
