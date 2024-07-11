@@ -13,8 +13,7 @@ output:
 - Gleiche Analyse für REHA
 - Komplette Analyse in ein Modell
 - Prädiktor Polymedikation bilden
-- Prädiktor Komorbidität ggf ändern? Elixhauser?
-- Prädiktor Pflegegrad aufnehmen
+- Prädiktor Komorbidität: optimales Zeitfenster finden (datadriven: Modellvergleich)
 
 
 ```{r setup, include=FALSE}
@@ -26,7 +25,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity")
+packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity", "car", "lme4", "ordinal", "export")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -98,7 +97,7 @@ ggplot(qwt, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(an
 
 #add Anzahl Tage in Behandlung
 qwt <- qwt %>% 
-  mutate(n_days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")))
+    mutate(n_days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
 
 ```
 
@@ -123,7 +122,7 @@ ENTL_ndays <- ggplot(qwt, aes(x = ENTL301, y = n_days, fill = unpl_drop)) +
   geom_boxplot(width = 0.2, outlier.shape = NA) +
   scale_y_continuous(breaks = seq(0, 100, by = 5)) +
   #change y axis label
-  ylab("Anzahl Tage in QWT") +
+  ylab("Anzahl Tage in QE") +
   xlab("Entlassungsgrund (ENTL301)") +
   #change legend title
   labs(fill = "Unplanmäßiger Behandlungsabbruch", title = "Dauer eines Qualifizierten Entzugs nach Entlassungsgrund unter GKV Versicherten", caption = "Anmerk.: Datenpunkte markieren einzelne Behandlungen") +
@@ -133,8 +132,13 @@ ENTL_ndays <- ggplot(qwt, aes(x = ENTL301, y = n_days, fill = unpl_drop)) +
   
 
 ENTL_ndays
-
+graph2doc(x = ENTL_ndays, file=file.path(folder_plot, "ENTL_ndays.png"), width=7, height=5)
 ggsave(file.path(folder_plot, "ENTL_ndays.png"), ENTL_ndays, width = 10, height = 6)
+
+#calculate IQR for n_days only among regulär beendeten Behandlungen
+qwt %>% 
+  filter(ENTL301 == "regulär") %>%
+  summarise(q25 = quantile(n_days, 0.25), q75 = quantile(n_days, 0.75), iqr = IQR(n_days), min = min(n_days), max = max(n_days))
 
 ```
 
@@ -147,20 +151,20 @@ Als alternative Operationalisierung der AV Behandlungserfolg (vorher: unplanmä�
 qwt <- qwt %>%
   mutate(treat_dur_cat = factor(case_when(
   #more than or 20 days in treatment
-  n_days >= 20 ~ 3,
+  n_days >= 21 ~ 3,
   #between 7 and 19 days (inclusive)
-  n_days >= 7 & n_days < 20 ~ 2,
+  n_days >= 7 & n_days < 21 ~ 2,
   #between 0 and 6 days (inclusive)
   n_days >= 0 & n_days < 7 ~ 1,
-  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("0-6 Tage","7-19 Tage", "20+ Tage")))
+  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
 
 qwt <- qwt %>%
   mutate(treat_dur_bin = factor(case_when(
   #more than or 20 days in treatment
-  n_days >= 20 ~ 2,
+  n_days >= 21 ~ 2,
   #below 20 days (inclusive)
-  n_days < 20 ~ 1,
-  TRUE ~ NA_real_), levels = c(1, 2), labels = c("unter 20 Tage", "20+ Tage")))
+  n_days < 21 ~ 1,
+  TRUE ~ NA_real_), levels = c(1, 2), labels = c("unter 21 Tage", "21+ Tage")))
 
 ```
 
@@ -176,7 +180,22 @@ ggplot(qwt, aes(x = n_days)) +
 #  scale_x_continuous(limits = c(0, 27)) 
 
 ```
+# Validierung qwt_id
+```{r check_qwt_id}
+# does the qwt_id increases with increasing date.qwt.start?
+qwt_check <- qwt %>% 
+  group_by(pragmaid) %>%
+  arrange(date.qwt.start) %>%
+  mutate(qwt_id_check = row_number()) %>%
+  select(pragmaid, qwt_id, qwt_id_check, date.qwt.start, date.qwt.end) #qwt_id does not increase with increasing date.qwt.start. therefore, replace qwt_id with qwt_id_check
 
+#replace qwt_id with qwt_id_check
+qwt <- qwt %>% 
+  group_by(pragmaid) %>%
+  arrange(date.qwt.start) %>%
+  mutate(qwt_id = row_number()) %>%
+  ungroup()
+```
 
 # Hinzufügen der OPS Codes
 ```{r OPS_codes}
@@ -198,13 +217,18 @@ ggplot(qwt, aes(x = n_days)) +
 # Hinzufügen der Stammdaten 
 ```{r add_stammdaten}
 #match pragma_id_GKV with qwt based on pragma_id (only columns names sex and yob)
-total_stamm <- left_join(qwt, pragma_id_GKV, by=c("pragmaid", "gkv"))
+total_stamm <- left_join(qwt, pragma_id_GKV, by="pragmaid")
 
 total_stamm <- total_stamm %>% 
-  select(c(-hivid, -gkv.id, -dak.id, -aok.id)) %>%
-  mutate(age = as.integer(substr(date.qwt.start, 1, 4)) - yob)
+  select(c(-hivid, -gkv.id, -dak.id, -aok.id, - gkv.y)) %>%
+  mutate(age = as.integer(substr(date.qwt.start, 1, 4)) - yob) %>%
+  rename(gkv = gkv.x)
+#4 patients with gkv aokdak (aokdak values are only present in the stamm data, but not in the qwt data, keep only gkv from qwt data)
 
 total_stamm$pragmaid <- factor(total_stamm$pragmaid)
+
+table(total_stamm$sex, useNA = "always")
+table(total_stamm$gkv, useNA = "always")
 ```
 
 # Hinzufügen Emplyoment Status
@@ -214,12 +238,17 @@ sum(is.na(employment$date.emp.start)) # 0
 sum(is.na(employment$date.emp.end)) # 0
 
 nrow(distinct(total_stamm, pragmaid, qwt_id)) #3857
-total_employ_all <- left_join(total_stamm, employment, by = c("pragmaid", "gkv"))
+total_employ_all <- left_join(total_stamm, employment, by = "pragmaid")
 sum(is.na(total_employ_all$date.emp.start)) # 0
 sum(is.na(total_employ_all$date.emp.end)) # 0
 # Filtern der Zeilen, sodass qwt_start innerhalb des Zeitraums von employ_start und employ_end liegt
 total_employ <- total_employ_all %>%
   filter(date.qwt.start >= date.emp.start & date.qwt.start <= date.emp.end)
+#do gkv.x and gkv.y have the same values?
+sum(total_employ$gkv.x != total_employ$gkv.y) #0 -> gkv.x and gkv.y have the same values, delete gkv.y and rename gkv.x to gkv
+total_employ <- total_employ %>% 
+  select(-gkv.y) %>%
+  rename(gkv = gkv.x)
 
 nrow(total_employ) - nrow(total_stamm) 
 #after the filter, there are 42 rows less than before
@@ -236,9 +265,10 @@ total_employ$source <- as.factor(total_employ$source)
 # Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
 ```{r check_missing_employment}
 #check if missing employment data is due to interruptions in insured periods
-check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid", "gkv")) %>%
-  select(pragmaid, date.qwt.start, date.qwt.end, date.ins.start, date.ins.end, gkv) 
+check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
+  select(pragmaid, date.qwt.start, date.qwt.end, date.ins.start, date.ins.end, gkv.x, gkv.y) 
 
+sum(check_missing$gkv.x != check_missing$gkv.y) #0 -> gkv.x and gkv.y have the same values
 #QWT Zeitraum liegt tatsächlich außerhalb des Versichertenzeitraums, daher fehlen auch die Employment Daten. Wieso? 
 ``` 
 # Hinzufügen von Diagnose-Daten
@@ -297,7 +327,9 @@ sum(is.na(total_employ$date.qwt.end)) #0
 #  distinct(pragmaid, qwt_id, icd, .keep_all = TRUE)
 
 #neues Zeitfenster für Diagnosen
-total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) 
+total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid")) 
+#are gkv.x and gkv.y the same?
+sum(total_diag_all$gkv.x != total_diag_all$gkv.y) # there are 518 rows where gkv.x and gkv.y are not the same
 nrow(distinct(total_diag_all, pragmaid, qwt_id)) #3815
 
 total_diag_all_filtered <- total_diag_all %>%
@@ -305,7 +337,10 @@ total_diag_all_filtered <- total_diag_all %>%
     #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
      date.diag.start >= (date.qwt.start - days(180)) & date.diag.start <= date.qwt.start)
 #Arbeitsdefinition, für stationäre Diagnosen (bzw. alle anderen settings) muss Eingrenzung noch angepasst werden
-  
+sum(total_diag_all_filtered$gkv.x != total_diag_all_filtered$gkv.y) #0, so cases where gkv.x and gkv.y are not the same are filtered out -> okay, delete gkv.y and rename gkv.x to gkv
+total_diag_all_filtered <- total_diag_all_filtered %>% 
+  select(-gkv.y) %>%
+  rename(gkv = gkv.x)
 
 nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) #3815
 
@@ -345,17 +380,17 @@ comorb <- comorbidity::comorbidity(x=total_diag_all_filtered, id = "id_pragma_qw
                                 code = "icd",map="elixhauser_icd10_quan",
                                 assign0 = T,tidy.codes = T)
 
-comorb <- comorb %>%
+comorb_sum <- comorb %>%
   #new column with row sums using all columns except the first one and "alcohol"
   mutate(elix_sum = rowSums(select(., -1, -alcohol))) %>%
   select(id_pragma_qwt, elix_sum)
         
 
-nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(comorb, id_pragma_qwt))
+nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(comorb_sum, id_pragma_qwt))
 # 0 patients - QWT combinations do not have any diagnoses that fulfill the criteria
 total_employ$id_pragma_qwt <- paste(total_employ$pragmaid, total_employ$qwt_id, sep = "_")
 
-total_diag <- left_join(total_employ, comorb, by = "id_pragma_qwt")
+total_diag <- left_join(total_employ, comorb_sum, by = "id_pragma_qwt")
 
 #are there missings? 
 nrow(total_employ) - nrow(total_diag) #0
@@ -390,50 +425,229 @@ unique(qwt$date.qwt.start) %>% sort() #5 QWTs wurden vor 2016 begonnen
 
 fost_filtered <- fosterage %>% 
   filter(pragmaid %in% total_diag$pragmaid)
-
+###NOT WORKING -> to be finished!
 nrow(distinct(total_diag, pragmaid)) - nrow(distinct(fost_filtered, pragmaid))
-#1675 patients do not have fosterage data
+#1660 patients do not have fosterage data
 #248 patients have fosterage data
-total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
-  filter(
-    (date.diag.start <= date.qwt.start & date.diag.end >= (date.qwt.end - months(1))) |  # Diagnosestart muss vor oder gleich QWT-Start liegen und Diagnose muss noch bis mindestens 1 Monat vor QWT-Ende laufen
-    (is.na(date.diag.end) & date.diag.start >= (date.qwt.start - months(1)) & date.diag.start <= date.qwt.start) |  # Falls date.diag.end NA ist, darf date.diag.start nur bis zu einem Monat vor QWT-Start und maximal gleich QWT-Start liegen
-    (is.na(date.diag.start) & date.diag.end >= (date.qwt.end - months(1)) & date.diag.end <= (date.qwt.end + weeks(1)))  # Falls date.diag.start NA ist, darf date.diag.end nur bis zu einem Monat vor und eine Woche nach QWT-Ende liegen
-  ) %>%
-  filter(icd.alc == "FALSE") %>%
-  distinct(pragmaid, qwt_id, icd, .keep_all = TRUE)
 
 #if pragmaid from total_diag is in fosterage and the respective QWT is within the fosterage period, add fosterage to total_diag. if not, set fosterage to NA
-total_fost <- left_join(total_diag, fosterage, by = c("pragmaid", "gkv")) %>%
-  filter(date.qwt.start >= date.fost.start & (is.na(date.fost.end) | date.qwt.start <= date.fost.end))
+total_fost_all <- left_join(total_diag, fost_filtered, by = "pragmaid") 
 
+nrow(distinct(total_fost_all, pragmaid)) #1908 patients -> correct
+
+total_fost_all_filtered <- total_fost_all %>%
+  filter((date.qwt.start >= date.fost.start & is.na(date.fost.end)) | (date.qwt.start >= date.fost.start & date.qwt.start <= date.fost.end))
+nrow(distinct(total_fost_all_filtered, pragmaid)) #98 patients do have fosterage data that is within the QWT period
+nrow(distinct(total_fost_all_filtered, pragmaid, qwt_id))# 169 qwts among 98 patients with fosterage data that is within the QWT period
+sum(total_fost_all_filtered$gkv.x != total_fost_all_filtered$gkv.y) #0 -> gkv.x and gkv.y are the same, delete gkv.y and rename gkv.x to gkv
+total_fost_all_filtered <- total_fost_all_filtered %>% 
+  select(-gkv.y) %>%
+  rename(gkv = gkv.x)
+
+# check data that is filtered out
+check_missing_fost <- total_fost_all %>% 
+  anti_join(total_fost_all_filtered, by = c("pragmaid", "date.qwt.start", "date.qwt.end", "date.fost.start", "date.fost.end")) %>%
+  select(pragmaid, date.qwt.start, date.qwt.end, date.fost.start, date.fost.end, fost.degree) # -> okay
+
+
+
+# add total_fost_all_filtered to total_diag and set fosterage to NA if no fosterage data is available
+total_fost <- total_diag %>%
+  left_join(total_fost_all_filtered %>% select(id_pragma_qwt, fost.degree), by = "id_pragma_qwt") %>%
+  mutate(fost.degree_bin = as.factor(ifelse(is.na(fost.degree), "nein", "ja")))
 
 total_fost$fost.degree <- as.factor(total_fost$fost.degree)
 table(total_fost$fost.degree, useNA = "always")
+table(total_fost$fost.degree_bin, useNA = "always")
+nrow(total_fost) - sum(is.na(total_fost$fost.degree)) #check: 169 qwts with fosterage degree -> okay
 
-```  
+```
 
+# Hinzufügen von Medikation
 
-```{r gkv_check}
-#are there pragmaids that have different values in gkv?
-total_diag %>% 
-  group_by(pragmaid) %>% 
-  filter(n_distinct(gkv) > 1)
-# no different gkvs for the same pragmaid
+```{r add_medication}
+
+med_filtered <- medications %>% 
+  filter(pragmaid %in% total_fost$pragmaid)
+
+nrow(distinct(total_fost, pragmaid)) - nrow(distinct(med_filtered, pragmaid)) #44 patients do not have medication data
+
+#add med_filtered to total_fost
+total_med_all <- left_join(total_fost, med_filtered, by = "pragmaid")
+
+nrow(distinct(total_med_all, pragmaid)) #1908 patients
+
+total_med_all_filtered <- total_med_all %>%
+# only keep medication data that happend during the 3 months before the QWT
+  filter(date.medi.disp >= (date.qwt.start - days(30)) & date.medi.disp <= date.qwt.start) %>%
+  filter(ATC != "")
+
+nrow(distinct(total_med_all_filtered, pragmaid, qwt_id)) # 2358 qwts with medication data during 3 months before
+nrow(distinct(total_fost, pragmaid, qwt_id)) - nrow(distinct(total_med_all_filtered, pragmaid, qwt_id)) # 1457 qwts without medication data during 3 months before
+
+sum(total_med_all_filtered$gkv.x != total_med_all_filtered$gkv.y) #0 -> gkv.x and gkv.y are the same, delete gkv.y and rename gkv.x to gkv
+
+total_med_all_filtered <- total_med_all_filtered %>% 
+  select(-c(gkv.y, REZ_ID, LANR_FAGS, date.medi.presc, PZN_ANZ, DDD1000_PK)) %>%
+  rename(gkv = gkv.x)
+
+missing_med <- total_med_all %>% 
+  anti_join(total_med_all_filtered, by = c("pragmaid", "date.qwt.start", "date.qwt.end", "date.medi.disp")) %>%
+  select(pragmaid, date.qwt.start, date.qwt.end, date.medi.disp) # -> okay
+rm(missing_med)
+
+#calculate number of full ATC and level 2 ATC codes
+total_med_sum <- total_med_all_filtered %>%
+  group_by(id_pragma_qwt) %>%
+  mutate(Level2_ATC = substr(ATC, 1, 3)) %>%
+  summarize(ndistinctATClevel2 = n_distinct(Level2_ATC), 
+            ndistinctATC = n_distinct(ATC))
+
+total_med <- left_join(total_fost, total_med_sum, by = "id_pragma_qwt")
+#set NAs in ndistinct to 0
+total_med <- total_med %>%
+  mutate(ndistinctATC = ifelse(is.na(ndistinctATC), 0, ndistinctATC)) %>%
+  mutate(ndistinctATClevel2 = ifelse(is.na(ndistinctATClevel2), 0, ndistinctATClevel2)) %>%
+  mutate(polymedi = as.factor(ifelse(ndistinctATC >= 6, "ja", "nein"))) %>%
+  mutate(polymedi_level2 = as.factor(ifelse(ndistinctATClevel2 >= 5, "ja", "nein")))
+
+summary(total_med$ndistinctATC)
+hist(total_med$ndistinctATC)
+
+summary(total_med$ndistinctATClevel2)
+hist(total_med$ndistinctATClevel2)
+
+table(total_med$polymedi)
+table(total_med$polymedi_level2)
+```
+
+# Auswahl relevanter Variablen
+```{r select_vars}
+total_med <- total_med %>% 
+  select(-c(KH_FALL_ID, date.kkh.start, date.kkh.end, date.qwt.start, date.qwt.end, date.emp.start, date.emp.end, id_pragma_qwt, fost.degree, source, icd.primary, icd.secondary, icd.admission, icd.other, died, date.death, ward))
+```
+
+#Speicherplatz freigeben
+```{r save_data}
+#alle Datenfiles die "all" oder "check" oder "missing" im Namen haben, können gelöscht werden
+#identifiziere alle Objekte, die gelöscht werden können
+objects <- ls()
+objects <- objects[grepl("all|check|missing", objects)]
+#lösche alle Objekte
+rm(list = objects)
+#free unused memory
+gc()
+```
+
+# Überpfrüfung der Daten vor Modellierung
+```{r check_data}
+#check for missings
+summary(total_med)
+anyNA(total_med) #no NAs
+total_med$gkv <- as.factor(total_med$gkv)
+total_med$pragmaid <- as.factor(total_med$pragmaid)
+
+#check for outliers
+boxplot(total_med$n_days) # not outliers
+boxplot(total_med$qwt_id) # some patients did 21 qwts -> remove outliers?
+
+#ckeck for multicollinearity
+logit_model <- glm(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2, data = total_med, family = binomial)
+car::vif(logit_model) #generalized variance inflation factor
+#"A consequence is that when using aGSIF, we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and #values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
+# no problems of multicollinearity
+
+#Plausi check ndistinct ATC (should increase with elix_sum)
+ggplot(total_med, aes(x = elix_sum, y = ndistinctATC)) + geom_point() + geom_smooth(method = "lm")
+#correlation between elix_sum and ndistinctATC?
+cor(total_med$elix_sum, total_med$ndistinctATC) #0.50 
+
+ggplot(total_med, aes(x = elix_sum, y = ndistinctATClevel2)) + geom_point() + geom_smooth(method = "lm")
+#correlation between elix_sum and ndistinctATClevel2?
+cor(total_med$elix_sum, total_med$ndistinctATClevel2) #0.51
+
 ```
 
 # Aufstellen eines Modells zur Vorhersage von unpl_drop
-```{r model}
+## Logistisches Modell zur Vorhersage von dichotomisierter Behandlungsdauer (unter vs. über 20 Tage)
+```{r model_glmm}
 #work in progress
-model1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + (1|gkv/pragmaid), data = total_diag, family = binomial)
-summary(model1)
+model1.1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|gkv/pragmaid), data = total_med, family = binomial)
 
-#AIC 3783.3
+summary(model1.1)
+```
+
+## Ordinales Modell zur Vorhersage von Behandlungsdauer in drei Kategorien
+```{r model_clmm}
+# Modellvergleich mit und ohne GKV
+model1.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + gkv + (1|pragmaid), data = total_med)
+
+summary(model1.2)
+AIC(model1.2)
+BIC(model1.2)
+logLik(model1.2)
+
+model1.3 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = total_med)
+
+print(model1.3)
+summary(model1.3)
+AIC(model1.3)
+BIC(model1.3)
+logLik(model1.3)
+
+#Modell ohne GKV ist besser
+```
+
+### Welche Variable für Medikation ergibt das beste Modell?
+```{r model_med}
+#Modell mit ndistinctATC
+
+model2.1 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = total_med)
+
+model2.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi_level2 + (1|pragmaid), data = total_med)
+
+model2.3 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + (1|pragmaid), data = total_med)
+
+model2.4 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATC + (1|pragmaid), data = total_med)
+
+model2.5 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + (1|pragmaid), data = total_med)
+#plomedikation mitaufzunehmen macht das Modell kaum/gar nicht besser, je nach Kriterium sogar schlechter
+
+#compare models
+for (i in 1:5) {
+  print(paste("Model", i))
+  print(AIC(get(paste("model2.", i, sep = ""))))
+  print(BIC(get(paste("model2.", i, sep = ""))))
+  print(logLik(get(paste("model2.", i, sep = ""))))
+}
+
+summary(model2.3)
+summary(model2.5) #elix_sum ist kein signifikanter Prädiktor, egal ob Medikation im Modell ist oder nicht
+#[1] "Model 4"
+#[1] 7021.353
+#[1] 7102.56
+#'log Lik.' -3497.677 (df=13)                
+
+#[1] "Model 2"
+#[1] 7020.536
+#[1] 7101.743 -> erniedrigen auf 5 medi -> schlechterer fit
+
+#Model mit 30 Tage Look Back Window und ndistinctATClevel2 hat das beste AIC, laut BIC (restriktiver gegenüber weiteren Prädiktoren) ist das Modell ohne Medikation am besten
+```
+
+
+
+#AIC 3762
+#AIC with non dichotomized nATCs 3763, 3763.8 with dichotomized nATCs in polymedi (5 or more ATCs is better than 6 or more)
 #Verleich 180 Tage Look back window und 90 Tage und 364: 180 Tage hat besseres AIC (3783.3 vs. 3784.3 vs. 3784.2)
 
-#model2 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + (1|pragmaid) + (1|gkv), data = #total_diag, family = binomial)
-#summary(model2)
-# exakt das gleiche Ergebnis wie model1
+
+# modelfit verbessert sich leicht, wenn ich keinen random intercept für gkv verwende
+
+#wenn polymedi mit rein genommen wird, dann wird BIC größer und p-Wert von elix_sum größer (war allerdings vorher schon nicht signifikant)
+
+#check significance of random effects
+plot(residuals(model1)) # 0.33 -> random effects are significant
 ```
 # Interpretation der festen Effekte
 
