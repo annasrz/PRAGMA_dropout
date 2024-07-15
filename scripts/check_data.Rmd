@@ -25,7 +25,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity", "car", "lme4", "ordinal", "export")
+packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -571,29 +571,29 @@ cor(total_med$elix_sum, total_med$ndistinctATClevel2) #0.51
 # Aufstellen eines Modells zur Vorhersage von unpl_drop
 ## Logistisches Modell zur Vorhersage von dichotomisierter Behandlungsdauer (unter vs. über 20 Tage)
 ```{r model_glmm}
-#work in progress
-model1.1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|gkv/pragmaid), data = total_med, family = binomial)
 
-summary(model1.1)
+#model1.1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|gkv/pragmaid), data = total_med, family = binomial)
+
+#summary(model1.1)
 ```
 
 ## Ordinales Modell zur Vorhersage von Behandlungsdauer in drei Kategorien
 ```{r model_clmm}
 # Modellvergleich mit und ohne GKV
-model1.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + gkv + (1|pragmaid), data = total_med)
+#model1.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + gkv + (1|pragmaid), data = total_med)
 
-summary(model1.2)
-AIC(model1.2)
-BIC(model1.2)
-logLik(model1.2)
+#summary(model1.2)
+#AIC(model1.2)
+#BIC(model1.2)
+#logLik(model1.2)
 
-model1.3 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = total_med)
+#model1.3 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = total_med)
 
-print(model1.3)
-summary(model1.3)
-AIC(model1.3)
-BIC(model1.3)
-logLik(model1.3)
+#print(model1.3)
+#summary(model1.3)
+#AIC(model1.3)
+#BIC(model1.3)
+#logLik(model1.3)
 
 #Modell ohne GKV ist besser
 ```
@@ -602,27 +602,28 @@ logLik(model1.3)
 ```{r model_med}
 #Modell mit ndistinctATC
 
-model2.1 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = total_med)
+#model2.1 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = total_med)
 
-model2.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi_level2 + (1|pragmaid), data = total_med)
+#model2.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi_level2 + (1|pragmaid), data = total_med)
 
 model2.3 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + (1|pragmaid), data = total_med)
 
-model2.4 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATC + (1|pragmaid), data = total_med)
+#model2.4 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATC + (1|pragmaid), data = total_med)
 
-model2.5 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + (1|pragmaid), data = total_med)
+#model2.5 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + (1|pragmaid), data = total_med)
 #plomedikation mitaufzunehmen macht das Modell kaum/gar nicht besser, je nach Kriterium sogar schlechter
 
 #compare models
-for (i in 1:5) {
-  print(paste("Model", i))
-  print(AIC(get(paste("model2.", i, sep = ""))))
-  print(BIC(get(paste("model2.", i, sep = ""))))
-  print(logLik(get(paste("model2.", i, sep = ""))))
-}
+#for (i in 1:5) {
+#  print(paste("Model", i))
+#  print(AIC(get(paste("model2.", i, sep = ""))))
+#  print(BIC(get(paste("model2.", i, sep = ""))))
+#  print(logLik(get(paste("model2.", i, sep = ""))))
+#}
 
 summary(model2.3)
-summary(model2.5) #elix_sum ist kein signifikanter Prädiktor, egal ob Medikation im Modell ist oder nicht
+save(model2.3, file = "modeloutput_CLMM_PRAGMA_dropout.RData")
+#summary(model2.5) #elix_sum ist kein signifikanter Prädiktor, egal ob Medikation im Modell ist oder nicht
 #[1] "Model 4"
 #[1] 7021.353
 #[1] 7102.56
@@ -634,20 +635,34 @@ summary(model2.5) #elix_sum ist kein signifikanter Prädiktor, egal ob Medikatio
 
 #Model mit 30 Tage Look Back Window und ndistinctATClevel2 hat das beste AIC, laut BIC (restriktiver gegenüber weiteren Prädiktoren) ist das Modell ohne Medikation am besten
 ```
+#Multinomiale Modelle
+```{r multinom_models}
+#nur Intercept und random effects
+model3.0 <- mblogit(formula = treat_dur_cat ~ 1, random = ~ 1 | pragmaid, data = total_med)
+summary(model3.0)
+getSummary.mblogit(model3.0)
+model3.1 <- mblogit(formula = treat_dur_cat ~ sex, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.1)
+model3.2 <- mblogit(formula = treat_dur_cat ~ sex + age, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.1)
+getSummary.mblogit(model3.2) #Model 2 ist besser
+model3.3 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.3) #Model 3 ist besser
+model3.4 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + nationality, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.4) #Modell 3 (treat_dur_cat ~ sex + age + qwt_id) scheint insgesamt die beste Modellanpassung zu bieten, basierend auf AIC und BIC, trotz der geringfügigen Verbesserung der Pseudo-R²-Werte durch Modell 4.
+#Modell 4 (treat_dur_cat ~ sex + age + qwt_id + nationality) bietet die besten Pseudo-R²-Werte und die niedrigste Deviance, aber es hat einen leicht höheren AIC und BIC im Vergleich zu Modell 3. Daher wird nationality nicht in das endgültige Modell aufgenommen.
+model3.5 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.5) #Modell 5 erklärt die Daten am umfassendsten und bietet insgesamt die beste Passung, basierend auf AIC, BIC, Pseudo-R² und Deviance. Allerdings hat Modell 3 ein besseres BIC. 
+model3.6 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.6) #Modell 6 ist besser
+model3.7 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + elix_sum, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.7) #Komorbidität verbessert Modell nicht und hat auch keinen siginifikanten Erklärungswert
+model3.8 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + fost.degree_bin, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.8) #Modell 6 ist besser
+model3.9 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + ndistinctATClevel2, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.9) #Modell 6 ist besser, interessant ist aber, dass aus den dtrei Prädiktoren, die die Krankheitslast beschreiben (forst_degree, elix_sum, ndistinctATClevel2), ndistinctATClevel2 den besseren model fit bietet nach allen Kriterien zufolge
 
 
-
-#AIC 3762
-#AIC with non dichotomized nATCs 3763, 3763.8 with dichotomized nATCs in polymedi (5 or more ATCs is better than 6 or more)
-#Verleich 180 Tage Look back window und 90 Tage und 364: 180 Tage hat besseres AIC (3783.3 vs. 3784.3 vs. 3784.2)
-
-
-# modelfit verbessert sich leicht, wenn ich keinen random intercept für gkv verwende
-
-#wenn polymedi mit rein genommen wird, dann wird BIC größer und p-Wert von elix_sum größer (war allerdings vorher schon nicht signifikant)
-
-#check significance of random effects
-plot(residuals(model1)) # 0.33 -> random effects are significant
 ```
 # Interpretation der festen Effekte
 
