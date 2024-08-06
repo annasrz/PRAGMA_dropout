@@ -25,7 +25,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit")
+packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -376,15 +376,27 @@ nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(total_diag_all_fi
 
 total_diag_all_filtered$id_pragma_qwt <- paste(total_diag_all_filtered$pragmaid, total_diag_all_filtered$qwt_id, sep = "_")
 
-comorb <- comorbidity::comorbidity(x=total_diag_all_filtered, id = "id_pragma_qwt",
+comorb_elix <- comorbidity::comorbidity(x=total_diag_all_filtered, id = "id_pragma_qwt",
                                 code = "icd",map="elixhauser_icd10_quan",
                                 assign0 = T,tidy.codes = T)
 
-comorb_sum <- comorb %>%
+comorb_char <- comorbidity::comorbidity(x=total_diag_all_filtered, id = "id_pragma_qwt",
+                                code = "icd",map="charlson_icd10_quan",
+                                assign0 = T,tidy.codes = T)
+
+comorb_elix_sum <- comorb_elix %>%
   #new column with row sums using all columns except the first one and "alcohol"
   mutate(elix_sum = rowSums(select(., -1, -alcohol))) %>%
   select(id_pragma_qwt, elix_sum)
-        
+
+comorb_char_sum <- comorb_char %>%
+  #new column with row sums using all columns except the first one and "alcohol"
+  mutate(char_sum = rowSums(select(., -1))) %>%
+  select(id_pragma_qwt, char_sum)
+
+#bind both comorbidity dataframes
+comorb_sum <- left_join(comorb_elix_sum, comorb_char_sum, by = "id_pragma_qwt")
+      
 
 nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(comorb_sum, id_pragma_qwt))
 # 0 patients - QWT combinations do not have any diagnoses that fulfill the criteria
@@ -399,8 +411,10 @@ sum(is.na(total_diag$elix_sum)) #0 missings in n_diagnoses_woa
 
 ```{r check_ndiagnoses}
 #plot histogram of number of diagnoses
-ggplot(total_diag, aes(x = elix_sum)) + geom_histogram(binwidth = 1)
-summary(total_diag$elix_sum)
+ggplot(comorb_sum, aes(x = elix_sum)) + geom_histogram(binwidth = 1)
+summary(comorb_sum$elix_sum)
+ggplot(comorb_sum, aes(x = char_sum)) + geom_histogram(binwidth = 1)
+summary(comorb_sum$char_sum) 
 ```
 # Hinzufügen von Pflegegraden
 ```{r add_pflegegrad}
@@ -485,8 +499,8 @@ total_med_all_filtered <- total_med_all %>%
 nrow(distinct(total_med_all_filtered, pragmaid, qwt_id)) # 2358 qwts with medication data during 3 months before
 nrow(distinct(total_fost, pragmaid, qwt_id)) - nrow(distinct(total_med_all_filtered, pragmaid, qwt_id)) # 1457 qwts without medication data during 3 months before
 
-sum(total_med_all_filtered$gkv.x != total_med_all_filtered$gkv.y) #0 -> gkv.x and gkv.y are the same, delete gkv.y and rename gkv.x to gkv
-
+sum(total_med_all_filtered$gkv.x != total_med_all_filtered$gkv.y) #0 -> gkv.x and 
+#gkv.y are the same, delete gkv.y and rename gkv.x to gkv
 total_med_all_filtered <- total_med_all_filtered %>% 
   select(-c(gkv.y, REZ_ID, LANR_FAGS, date.medi.presc, PZN_ANZ, DDD1000_PK)) %>%
   rename(gkv = gkv.x)
@@ -496,10 +510,23 @@ missing_med <- total_med_all %>%
   select(pragmaid, date.qwt.start, date.qwt.end, date.medi.disp) # -> okay
 rm(missing_med)
 
-#calculate number of full ATC and level 2 ATC codes
+#new variable with level 2 ATCs (therapeutische Untergruppe)
 total_med_sum <- total_med_all_filtered %>%
   group_by(id_pragma_qwt) %>%
   mutate(Level2_ATC = substr(ATC, 1, 3)) %>%
+  ungroup()
+
+#how many different values of Level2_ATC are there? 
+unique_level2_ATCs <- unique(total_med_sum$Level2_ATC)
+anzahl_distinkte_ATCs <- length(unique_level2_ATCs) #64
+
+# welche Untergruppe ist am häufigsten vertreten?
+sorted_atc_counts <- total_med_sum %>%
+  count(Level2_ATC, sort = TRUE) #Psycholeptika (N05) kommt am häufigsten vor
+
+#calculate sum of disting full ATC and level 2 ATC codes
+total_med_sum <- total_med_sum %>%
+  group_by(id_pragma_qwt) %>%
   summarize(ndistinctATClevel2 = n_distinct(Level2_ATC), 
             ndistinctATC = n_distinct(ATC))
 
@@ -548,11 +575,11 @@ total_med$gkv <- as.factor(total_med$gkv)
 total_med$pragmaid <- as.factor(total_med$pragmaid)
 
 #check for outliers
-boxplot(total_med$n_days) # not outliers
+boxplot(total_med$n_days) # no outliers
 boxplot(total_med$qwt_id) # some patients did 21 qwts -> remove outliers?
 
 #ckeck for multicollinearity
-logit_model <- glm(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2, data = total_med, family = binomial)
+logit_model <- glm(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + char_sum + fost.degree_bin + ndistinctATClevel2, data = total_med, family = binomial)
 car::vif(logit_model) #generalized variance inflation factor
 #"A consequence is that when using aGSIF, we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and #values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 # no problems of multicollinearity
@@ -560,11 +587,19 @@ car::vif(logit_model) #generalized variance inflation factor
 #Plausi check ndistinct ATC (should increase with elix_sum)
 ggplot(total_med, aes(x = elix_sum, y = ndistinctATC)) + geom_point() + geom_smooth(method = "lm")
 #correlation between elix_sum and ndistinctATC?
-cor(total_med$elix_sum, total_med$ndistinctATC) #0.50 
+cor(total_med$elix_sum, total_med$ndistinctATC) #0.50
 
+#correlation of elix_sum and char_sum
+cor(total_med$elix_sum, total_med$char_sum) #0.75-> high correlation
+ggplot(total_med, aes(x = elix_sum, y = char_sum)) + geom_point() + geom_smooth(method = "lm")
+
+#correlation between elix_sum and ndistinctATClevel2
 ggplot(total_med, aes(x = elix_sum, y = ndistinctATClevel2)) + geom_point() + geom_smooth(method = "lm")
-#correlation between elix_sum and ndistinctATClevel2?
 cor(total_med$elix_sum, total_med$ndistinctATClevel2) #0.51
+
+#corr between char_sum and ndistinctATClevel2
+cor(total_med$char_sum, total_med$ndistinctATClevel2) #0.35
+ggplot(total_med, aes(x = char_sum, y = ndistinctATClevel2)) + geom_point() + geom_smooth(method = "lm")
 
 ```
 
@@ -655,12 +690,18 @@ model3.5 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type, ran
 getSummary.mblogit(model3.5) #Modell 5 erklärt die Daten am umfassendsten und bietet insgesamt die beste Passung, basierend auf AIC, BIC, Pseudo-R² und Deviance. Allerdings hat Modell 3 ein besseres BIC. 
 model3.6 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv, random = ~ 1 | pragmaid, data = total_med)
 getSummary.mblogit(model3.6) #Modell 6 ist besser
-model3.7 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + elix_sum, random = ~ 1 | pragmaid, data = total_med)
-getSummary.mblogit(model3.7) #Komorbidität verbessert Modell nicht und hat auch keinen siginifikanten Erklärungswert
-model3.8 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + fost.degree_bin, random = ~ 1 | pragmaid, data = total_med)
-getSummary.mblogit(model3.8) #Modell 6 ist besser
-model3.9 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + ndistinctATClevel2, random = ~ 1 | pragmaid, data = total_med)
-getSummary.mblogit(model3.9) #Modell 6 ist besser, interessant ist aber, dass aus den dtrei Prädiktoren, die die Krankheitslast beschreiben (forst_degree, elix_sum, ndistinctATClevel2), ndistinctATClevel2 den besseren model fit bietet nach allen Kriterien zufolge
+model3.7.1 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + elix_sum, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.7.1) #Komorbidität nach Elixhauser verbessert Modell nicht und hat auch keinen siginifikanten Erklärungswert
+model3.7.2 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + char_sum, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.7.2) #Komorbidität nach Charlson verbessert Modell und hat siginifikanten Erklärungswert
+model3.8 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + char_sum + fost.degree_bin, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mblogit(model3.8) #Modell 7.2 ist besser
+model3.9 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + char_sum + ndistinctATClevel2, random = ~ 1 | pragmaid, data = total_med)
+getSummary.mmblogit(model3.9)#Basierend auf den AIC-, BIC- und Pseudo-R²-Maßen scheint Model 3.9 das beste Modell zu sein. Es hat die niedrigsten AIC- und die besten Pseudo-R²-Werte (McFadden, Cox-Snell und Nagelkerke). Obwohl es nicht den niedrigsten BIC-Wert hat (dieser geht an Model 3.7.2), sind die anderen Verbesserungen signifikant.
+
+sjPlot::plot_model(model3.9)
+
+# alt: Modell 6 ist besser, interessant ist aber, dass aus den dtrei Prädiktoren, die die Krankheitslast beschreiben (forst_degree, elix_sum, ndistinctATClevel2), ndistinctATClevel2 den besseren model fit bietet nach allen Kriterien zufolge
 
 
 ```
