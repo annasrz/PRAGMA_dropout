@@ -1,0 +1,250 @@
+---
+title: "INPAT_dropout"
+author: "Anna"
+date: "2024-08-07"
+output: 
+  html_document:
+    code_folding: hide
+---
+# To-Dos
+
+- ....
+
+
+Bei INPAT handelt es sich um stationäre, alkoholbezogene Kontakte (Haupt- oder Fachabteilungsdoiagnose Alkohol), die KEIN qualifizierter Entzug sind. OPS Codes: 9-60x; 9-61x; 9-62x
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = -1)
+```
+# Vorbereitungen
+
+```{r essentials}
+# clean workspace
+rm(list=ls())
+packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+# Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+
+# current date:
+DATE <- format(Sys.Date(), "%Y%m%d")
+
+# themes and options
+options(scipen = 999)
+
+# output folders
+folder_table <- file.path("..", "output/tables")
+folder_plot <- file.path("..", "output/figures")
+
+if (!file.exists(folder_table)) {
+  dir.create(folder_table, recursive = TRUE)
+}
+
+if (!file.exists(folder_plot)) {
+  dir.create(folder_plot, recursive = TRUE)
+}
+```
+
+# Daten Import
+
+```{r data_import}
+print(getwd())
+datapath <- file.path("..", "input") 
+#read in all files in datapath 
+filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
+
+#save all files as separate dataframes
+ldf <- lapply(filenames, readRDS)
+names(ldf) <- gsub(".rds", "", basename(filenames))
+print(names(ldf))
+names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha")
+names(ldf) <- names
+#check if all dataframes are loaded
+ls()
+list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
+rm(ldf)
+```
+# Daten vorbereiten
+
+## Outcome Variablen Definition? 
+
+### ENTLASS301
+```{r recode_ENTL}
+table(inpat$ENTL301)
+
+#inpat as factor with new labels
+inpat$ENTL301 <- factor(inpat$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 14, 15, 17, 22), labels = c("regulär", "beendet, nachstat. Beh. vorgesehen", "aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "Verlegung in ein anderes Krankenhaus", "Tod", "Rehaeinrichtung",
+"Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."))
+#was passiert nach interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG?
+
+#same for qwt
+table(qwt$ENTL301)
+qwt$ENTL301 <- factor(qwt$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 14, 15, 17, 22), labels = c("regulär", "beendet, nachstat. Beh. vorgesehen", "aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "Verlegung in ein anderes Krankenhaus", "Tod", "Rehaeinrichtung",
+"Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."))
+
+```
+### Validierung der ENTLASS301 Variable an Behandlungsdauer
+
+```{r check_ENTL301}
+prop.table(table(inpat$ENTL301))
+prop.table(table(qwt$ENTL301))
+
+ggplot(inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
+
+#add Anzahl Tage in Behandlung
+qwt <- qwt %>% 
+  mutate(n.days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
+
+inpat$n.days <- as.numeric(inpat$n.days)
+
+
+summary(qwt$n.days)
+summary(inpat$n.days)
+IQR(qwt$n.days)
+IQR(inpat$n.days)
+#check outliers
+boxplot(qwt$n.days)
+boxplot(inpat$n.days) #sehr viele Ausreißer, Maximum 365 Tage
+inpat_wooutliers <- inpat %>% filter(n.days < quantile(n.days, 0.75) + 3*IQR(n.days))
+#how many cases are removed?
+nrow(inpat) - nrow(inpat_wooutliers) #78 cases with ndays more than 3 IQRs away from the median
+#show cases with n.days > 3 IQRs
+
+# bind datasets for plotting purposes
+inpat$dataset <- "inpat"
+qwt$dataset <- "qwt"
+
+qwt_inpat <- bind_rows(
+  inpat %>% select(ENTL301, n.days, dataset),
+  qwt %>% select(ENTL301, n.days, dataset)
+)
+
+
+ggplot(qwt_inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
+#INPAT hat größeren Anteil "gegen ärztlichen Rat beendet" und "aus sonstigen Gründen beendet" verglichen mit QWT
+
+ggplot(qwt_inpat %>% filter(ENTL301 != "Tod"), aes(x = dataset, y = n.days)) +
+  geom_jitter(alpha=0.2, size = rel(0.8), height = 0.2) +
+  geom_violinhalf(width = 0.3, outlier.shape = NA) +
+  geom_boxplot(width = 0.05, outlier.shape = NA) +
+  scale_y_continuous(limits = c(0, 60), breaks = seq(0, 60, by = 5))
+
+
+ggplot(qwt_inpat %>% filter(ENTL301 != "Tod"), aes(x = ENTL301, y = n.days)) + 
+  geom_jitter(alpha = 0.1, size = rel(0.65)) +
+  geom_boxplot(width = 0.34, outlier.shape = NA, alpha = 0.7) +
+  facet_grid(dataset ~ .) +
+  scale_y_continuous(limits = c(0, 50), breaks = seq(0, 50, by = 10)) +
+  #change y axis label
+  ylab("Anzahl Tage in QE") +
+  xlab("Entlassungsgrund (ENTL301)") +
+  #change legend title
+  labs(title = "Dauer eines Qualifizierten Entzugs nach Entlassungsgrund unter GKV Versicherten", caption = "Anmerk.: Datenpunkte markieren einzelne Behandlungen") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = rel(0.85)))
+```
+Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur wenige Tage dauern. Es gibt eine ähnliche, aber nicht ganz so stark ausgepärgte zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche und 21 Tage. Die ENTL301-Variable scheint daher (wieder) nicht ideal um einen Dropout bzw. einen erfolgreichen Behandlungsabschluss zu operationalisieren.
+
+Als alternative Operationalisierung der AV Behandlungserfolg des Aufenthalts ziehen wir daher stattdessen (wie mit den QWT Daten) die Anzahl der Tage in Behandlung heran. Die Behandlungsdauer teilen wir in drei Gruppen ein: 0-6 Tage, 7-20 Tage, und 21+ Tage. Dies entspricht einigermaßen der empirischen Verteilung, wobei die inhaltliche Bedeutung unklar ist. 
+
+
+### Behandlungsdauer als AV
+```{r create vars}
+qwt_inpat <- qwt_inpat %>%
+  mutate(treat_dur_cat = factor(case_when(
+  #more than or 20 days in treatment
+  n.days >= 21 ~ 3,
+  #between 7 and 19 days (inclusive)
+  n.days >= 7 & n.days < 21 ~ 2,
+  #between 0 and 6 days (inclusive)
+  n.days >= 0 & n.days < 7 ~ 1,
+  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
+
+#check distribution
+ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
+
+```
+# Prädiktoren
+
+## Validierung qwt_id
+```{r check_qwt_id}
+# does the inpat_id increases with increasing date.inpat.start?
+inpat_check <- inpat %>% 
+  group_by(pragmaid) %>%
+  arrange(date.inpat.start) %>%
+  mutate(inpat_id_ordered = row_number()) %>%
+  select(pragmaid, inpat_id, inpat_id_ordered, date.inpat.start, date.inpat.end) #inpat_id was unordered before. therefore, replace inpat_id with inpat_id_ordered
+
+#correct inpat_id, so that it is ordered by date.inpat.start
+inpat <- inpat %>% 
+  group_by(pragmaid) %>%
+  arrange(date.inpat.start) %>%
+  mutate(inpat_id = row_number())
+```
+
+## Hinzufügen der Stammdaten - SEX AND AGE
+```{r add_stammdaten}
+#match pragma_id_GKV with inpat based on pragma_id to get sex and age information 
+total_stamm <- left_join(inpat, pragma_id_GKV, by="pragmaid")
+
+
+table(total_stamm$gkv.x, useNA = "always")
+table(total_stamm$gkv.y, useNA = "always") # 7 cases that are insured by both AOK and DAK (this information is not needed for the analysis, so keep only the insurence information from gkv.x)
+
+total_stamm <- total_stamm %>% 
+  select(c(-hivid, -gkv.id, -dak.id, -aok.id, - gkv.y)) %>%
+  mutate(age = as.integer(substr(date.inpat.start, 1, 4)) - yob) %>% #calculate age at the beginning of the inpatient treatment
+  rename(gkv = gkv.x) #rename gkv.x to gkv
+
+total_stamm$pragmaid <- factor(total_stamm$pragmaid)
+
+table(total_stamm$sex, useNA = "always") # 0 NAs
+summary(total_stamm$age) # 0 NAs
+```
+
+## Hinzufügen Emplyoment Status
+```{r add_employment}
+nrow(distinct(total_stamm, pragmaid, inpat_id)) #3887 Fälle
+employ_unfiltered <- left_join(total_stamm, employment, by = "pragmaid")
+nrow(distinct(total_stamm, pragmaid, inpat_id)) # 3887 cases
+
+table(employ_unfiltered$gkv.x, useNA = "always")
+table(employ_unfiltered$gkv.y, useNA = "always") #same
+
+employ_unfiltered <- employ_unfiltered %>% 
+  select(- gkv.y) %>%
+  rename(gkv = gkv.x) #rename gkv.x to gkv
+
+inpat_employ <- employ_unfiltered %>%
+  filter(date.inpat.start >= date.emp.start & date.inpat.start <= date.emp.end)
+
+nrow(distinct(inpat_employ, pragmaid, inpat_id))
+nrow(inpat_employ) - nrow(total_stamm) # there are 30 cases less than before - why?
+
+missing_rows <- total_stamm %>%
+  anti_join(inpat_employ, by = c("pragmaid", "inpat_id"))
+
+employment %>% filter(pragmaid %in% missing_rows$pragmaid) %>% group_by(pragmaid) # no employment data for the inpat duration of these cases - why? 
+```
+
+### Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
+```{r check_missing_employment}
+#check if missing employment data is due to interruptions in insured periods
+check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
+  select(pragmaid, date.inpat.start, date.inpat.end, date.ins.start, date.ins.end, gkv.x) 
+
+#filter cases where the inpat treatment is covered by insurance
+cases_with_valid_ins <- check_missing %>% filter(date.inpat.start >= date.ins.start & date.inpat.start <= date.ins.end) #there are 8 cases that do have insurance data for the inpatient treatment, but have no corresponding employment data. these cases should be kept in the inpat_employ dataset, as they are insured during the inpatient treatment and the employment status should be set to NA.
+
+# -> some, but not all cases with missing employment data are due to interruptions in insured periods
+
+#add cases with valid insurance to inpat_employ
+inpat_employ <- bind_rows(inpat_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.inpat.start %in% cases_with_valid_ins$date.inpat.start))
+
+table(inpat_employ$emp.type, useNA = "always") # 8 NAs, so the 8 cases without employment infos, but with insurance are added to the inpat_employ dataset
+``` 
