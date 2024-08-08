@@ -263,18 +263,15 @@ sum(check_missing$gkv.x != check_missing$gkv.y) #0 -> gkv.x and gkv.y have the s
 ```{r add_diagnoses}
 sum(is.na(all_diagnoses$pragmaid)) #158
 
-diagnoses_filtered <- all_diagnoses %>% 
-  filter(pragmaid %in% total_employ$pragmaid) #keep only rows that are also in total_employ
-
-nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid)) #0, all patients have diagnoses
-
 table(diagnoses_filtered$icd_type)
 
-diagnoses_filtered <- diagnoses_filtered %>% 
+diagnoses_filtered <- all_diagnoses %>% 
+  filter(pragmaid %in% total_employ$pragmaid) %>% #keep only rows that are in inpat data 
   filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
+  filter(icd.alc == FALSE) %>% #keep only diaignoses that are not alcohol related (as all inpat cases are alcohol related)
   mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
 
-nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid)) #0, all patients have diagnoses that fulfill the criteria
+nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid)) 
 
 summary(diagnoses_filtered$length_diag)
 #plot histogram of length_diag
@@ -293,15 +290,13 @@ diagnoses_filtered <- select(diagnoses_filtered, -length_diag)
 sum(is.na(diagnoses_filtered$date.diag.start)) #20
 sum(is.na(diagnoses_filtered$date.diag.end)) #17
 sum(is.na(diagnoses_filtered$setting)) #0
-sum(is.na(total_employ$date.qwt.start)) #0
-sum(is.na(total_employ$date.qwt.end)) #0
 
 #if date.diag.end is NA, set it to date.diag.start
 #diagnoses_filtered <- diagnoses_filtered %>% 
 #  mutate(date.diag.end = ifelse(is.na(date.diag.end), date.diag.start, date.diag.end))
 #if date.diag.start is NA, set it to date.diag.end
-#diagnoses_filtered <- diagnoses_filtered %>% 
-#  mutate(date.diag.start = ifelse(is.na(date.diag.start), date.diag.end, date.diag.start))
+diagnoses_filtered <- diagnoses_filtered %>% 
+  mutate(date.diag.start = dplyr::if_else(is.na(date.diag.start), date.diag.end, date.diag.start))
 
 #add diagnoses to total_employ and filter for diagnoses according to time criteria and exclude alcohol diagnoses
 #total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
@@ -313,10 +308,8 @@ sum(is.na(total_employ$date.qwt.end)) #0
 #  filter(icd.alc == "FALSE") %>%
 #  distinct(pragmaid, qwt_id, icd, .keep_all = TRUE)
 
-#neues Zeitfenster für Diagnosen
 total_diag_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid")) 
-#are gkv.x and gkv.y the same?
-sum(total_diag_all$gkv.x != total_diag_all$gkv.y) # there are 518 rows where gkv.x and gkv.y are not the same
+
 nrow(distinct(total_diag_all, pragmaid, qwt_id)) #3815
 
 total_diag_all_filtered <- total_diag_all %>%
@@ -324,18 +317,14 @@ total_diag_all_filtered <- total_diag_all %>%
     #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
      date.diag.start >= (date.qwt.start - days(180)) & date.diag.start <= date.qwt.start)
 #Arbeitsdefinition, für stationäre Diagnosen (bzw. alle anderen settings) muss Eingrenzung noch angepasst werden
-sum(total_diag_all_filtered$gkv.x != total_diag_all_filtered$gkv.y) #0, so cases where gkv.x and gkv.y are not the same are filtered out -> okay, delete gkv.y and rename gkv.x to gkv
+sum(total_diag_all_filtered$gkv.x != total_diag_all_filtered$gkv.y) 
 total_diag_all_filtered <- total_diag_all_filtered %>% 
   select(-gkv.y) %>%
   rename(gkv = gkv.x)
 
-nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) #3815
-
-nrow(distinct(total_diag_all, pragmaid, qwt_id)) - nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) #0
-
-check_missing_diag <- total_diag_all %>% 
-  anti_join(total_diag_all_filtered, by = c("pragmaid", "qwt_id", "icd", "date.diag.start", "date.diag.end", "setting", "icd.alc")) %>%
-  select(pragmaid, qwt_id, icd, date.diag.start, date.diag.end, date.qwt.start, date.qwt.end, setting) # -> okay
+#checks
+nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id))
+nrow(distinct(total_diag_all, pragmaid, qwt_id)) - nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) 
 
 #----------------------------------------------
 # Testen mit einem kleinen Beispiel-Datensatz
@@ -356,9 +345,6 @@ result <- test_df %>%
     TRUE ~ 0
   ))
 #----------------------------------------------
-
-nrow(distinct(total_employ, pragmaid)) - nrow(distinct(total_diag_all_filtered, pragmaid)) #0 patients do not have any diagnoses that fulfill the criteria -> die Berücksichtigung von NAs in Filterung ändert hier nichts
-nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(total_diag_all_filtered, pragmaid, qwt_id)) # 0 patient - QWT combinations do not have any diagnoses that fulfill the criteria -> die Berücksichtigung von NAs in Filterung ändert hier nichts
 
 
 total_diag_all_filtered$id_pragma_qwt <- paste(total_diag_all_filtered$pragmaid, total_diag_all_filtered$qwt_id, sep = "_")
@@ -394,6 +380,13 @@ total_diag <- left_join(total_employ, comorb_sum, by = "id_pragma_qwt")
 #are there missings? 
 nrow(total_employ) - nrow(total_diag) #0
 sum(is.na(total_diag$elix_sum)) #0 missings in n_diagnoses_woa
+sum(is.na(total_diag$char_sum)) #0 missings in n_diagnoses_wa
+
+#set NAs to 0
+total_diag <- total_diag %>% 
+  mutate(elix_sum = replace_na(elix_sum, 0),
+         char_sum = replace_na(char_sum, 0))
+
 ```
 
 ```{r check_ndiagnoses}
@@ -426,7 +419,7 @@ unique(qwt$date.qwt.start) %>% sort() #5 QWTs wurden vor 2016 begonnen
 
 fost_filtered <- fosterage %>% 
   filter(pragmaid %in% total_diag$pragmaid)
-###NOT WORKING -> to be finished!
+
 nrow(distinct(total_diag, pragmaid)) - nrow(distinct(fost_filtered, pragmaid))
 #1660 patients do not have fosterage data
 #248 patients have fosterage data
