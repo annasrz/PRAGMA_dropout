@@ -504,12 +504,40 @@ summary(final_data)
 anyNA(final_data) #8 NAs in EmpType -> set to "other"
 final_data$emp.type[is.na(final_data$emp.type)] <- "other"
 
-#outliers?
-boxplot(final_data$n.days)# many outliers
+##outliers?
+## remove #all outliers that match the definition: bigger than 75% quantile + 3*IQR (Tukey's fences)
+
+# inpat_id
 boxplot(final_data$inpat_id) # some patients did 30 treatments -> remove them?
-#remove them. definition outlier: n.days bigger than 75% quantile + 3*IQR (Tukey's fences)
+cutoff_inpatid <- quantile(final_data$inpat_id, 0.75) + 3*IQR(final_data$inpat_id)
+cutoff_inpatid
+#remove them
+final_data <- final_data %>% filter(inpat_id <= cutoff_inpatid)
+
+# ndays
+boxplot(final_data$n.days)# many outliers
 cutoff <- quantile(final_data$n.days, 0.75) + 3*IQR(final_data$n.days)
 final_data <- final_data %>% filter(n.days <= cutoff)
+
+# char_sum
+boxplot(final_data$char_sum) # some outliers
+cutoff_char <- quantile(final_data$char_sum, 0.75) + 3*IQR(final_data$char_sum)
+cutoff_char
+final_data <- final_data %>% filter(char_sum <= cutoff_char)
+
+#elix_sum
+boxplot(final_data$elix_sum) # some outliers
+cuttoff_elix <- quantile(final_data$elix_sum, 0.75) + 3*IQR(final_data$elix_sum)
+cuttoff_elix
+final_data <- final_data %>% filter(elix_sum <= cuttoff_elix)
+
+#ndistinctATClevel2
+boxplot(final_data$ndistinctATClevel2) # some outliers
+cutoff_ndistinctATClevel2 <- quantile(final_data$ndistinctATClevel2, 0.75) + 3*IQR(final_data$ndistinctATClevel2)
+cutoff_ndistinctATClevel2
+final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
+
+#
 
 # check for multicollinearity
 #Just run “linear regression” after assuming categorical dependent variable as continuous variable
@@ -519,11 +547,8 @@ vif_model <- lm(treat_dur_cat_num ~ sex + age + inpat_id + nationality + emp.typ
 car::vif(vif_model) #no multicollinearity
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 
-# ASSUMPTIONS:
-#Linearity: The relationship between the independent variables and the log-odds of the categorical outcome should be linear. This means that the effect of the independent variables on the categorical outcome should be linear in the log-odds scale.
-#- Test this!
-#- One way to test this is to plot the predicted probabilities against the independent variables. If the relationship is linear, the predicted probabilities should be linearly related to the independent variables.
-#- Another way to test this is to plot the residuals against the predicted probabilities. If the relationship is linear, the residuals should be randomly scattered around zero for all predicted probabilities.
+
+
 
 ```
 
@@ -607,6 +632,68 @@ choose_best_model <- function(summary_df, criterion) {
   return(best_model_row)
 }
 
-choose_best_model(model_summaries, "Deviance") #Model 8 hat den besten fit
+choose_best_model(model_summaries, "BIC") #Model 3 hat den besten fit
+choose_best_model(model_summaries, "AIC") #Model 8 hat den besten fit
+choose_best_model(model_summaries, "Deviance") #Model 11 hat den besten fit
 
+```
+Ergebnisse aus Model 8:
+
+- Personen in Rente haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt. 
+- Ältere Personen hingegen haben eine erhöhte Wahrscheinlichkeit für einen längeren Aufenthalt (sowohl 7-20, als auch 21+ Tage)
+- Personen mit höherm Elixhauser Scores haben eine erhöhte Wahrscheinlichkeit für einen längeren Aufenthalt (sowohl 7-20, als auch 21+ Tage)
+- je mehr inpatient treatments eine Person hatte, desto niedriger die Wahrscheinlichkeit für einen längeren Aufenthalt (nur 1-6 vs 21+ Tage signifikant)
+
+
+
+
+# Check linearity assumption
+```{r check_linearity}
+
+# ASSUMPTIONS:
+#Linearity: Linear relationship between continuous variables and the logit transformation of the outcome variable. 
+
+probabilities <- predict(model8, type = "response")
+#dataset with only continuous variables
+final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, char_sum)))
+
+predictors <- colnames(final_data_cont)
+
+
+# Logit für jede Kategorie berechnen 
+logits <- apply(probabilities, 2, function(p) log(p / (1 - p)))
+
+logits_df <- as.data.frame(logits) 
+combined_data <- cbind(final_data_cont, logits_df)
+
+final_data_long <- combined_data %>%
+  pivot_longer(
+    cols = all_of(names(logits_df)),  # Nutze die Spaltennamen deiner logits_df direkt
+    names_to = "category",
+    values_to = "logit"
+  ) %>%
+  pivot_longer(
+    cols = all_of(predictors),   # Stelle sicher, dass predictors existiert
+    names_to = "predictors",
+    values_to = "predictor.value"
+  )
+
+# Scatterplot
+ckeck_lin <- ggplot(final_data_long, aes(x = predictor.value, y = logit)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") +
+  theme_bw() +
+  facet_grid(category ~ predictors, scales = "free") +
+  labs(
+    title = "Beziehung zwischen Prädiktoren und Logits",
+    x = "Prädiktorwert",
+    y = "Logit"
+  ) +
+    theme(
+    strip.text = element_text(size = 6)  # Verkleinert die Textgröße für Facettenbeschriftungen
+  )
+
+ggsave("check_linearity.png", ckeck_lin, width = 20, height = 25, units = "cm")
+
+#looks mostly fine, but maybe some problems with elix_sum (plot for 7-20 days), looks rather cubic than linear
 ```
