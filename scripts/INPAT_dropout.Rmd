@@ -343,8 +343,8 @@ comorb_char_sum <- comorb_char %>%
 comorb_sum <- left_join(comorb_elix_sum, comorb_char_sum, by = "id_pragma_inpat")
 print(head(comorb_sum))      
 
-nrow(distinct(inpat_employ, pragmaid, inpat_id)) - nrow(distinct(comorb_sum, id_pragma_inpat)) #23 cases, these have to be added to the comorb_sum dataset
-# 0 patients - QWT combinations do not have any diagnoses that fulfill the criteria
+nrow(distinct(inpat_employ, pragmaid, inpat_id)) - nrow(distinct(comorb_sum, id_pragma_inpat)) #23 cases, these have to be added to the comorb_sum dataset 
+
 inpat_employ$id_pragma_inpat <- paste(inpat_employ$pragmaid, inpat_employ$inpat_id, sep = "_")
 
 diagnoses_inpat_employ <- left_join(inpat_employ, comorb_sum, by = "id_pragma_inpat")
@@ -478,7 +478,7 @@ final_data <- med_fost_diagnoses_inpat_employ %>%
   select(-c(KH_FALL_ID, date.inpat.start, date.inpat.end, dataset, date.emp.start, date.emp.end, id_pragma_inpat, fost.degree, source, died, date.death, yob))
 ```
 
-# Daten speichern
+# Speicherplatz freigeben
 ```{r save_data}
 #alle Datenfiles die "all" oder "check" oder "missing" im Namen haben, können gelöscht werden
 #identifiziere alle Objekte, die gelöscht werden können
@@ -537,7 +537,7 @@ cutoff_ndistinctATClevel2 <- quantile(final_data$ndistinctATClevel2, 0.75) + 3*I
 cutoff_ndistinctATClevel2
 final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
 
-#
+
 
 # check for multicollinearity
 #Just run “linear regression” after assuming categorical dependent variable as continuous variable
@@ -637,12 +637,108 @@ choose_best_model(model_summaries, "AIC") #Model 8 hat den besten fit
 choose_best_model(model_summaries, "Deviance") #Model 11 hat den besten fit
 
 ```
-Ergebnisse aus Model 8:
+# Predicted Probabilities 
 
-- Personen in Rente haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt. 
-- Ältere Personen hingegen haben eine erhöhte Wahrscheinlichkeit für einen längeren Aufenthalt (sowohl 7-20, als auch 21+ Tage)
-- Personen mit höherm Elixhauser Scores haben eine erhöhte Wahrscheinlichkeit für einen längeren Aufenthalt (sowohl 7-20, als auch 21+ Tage)
-- je mehr inpatient treatments eine Person hatte, desto niedriger die Wahrscheinlichkeit für einen längeren Aufenthalt (nur 1-6 vs 21+ Tage signifikant)
+```{r plot_pred_probs}
+# Predicted probabilities
+# Erstelle ein neues Datenset, durch das die Variablen, die dich interessieren, variiert werden
+
+
+#define function to generate new data that varies the variables of interest (age, inpat_id, elix_sum) and then plot the predicted probabilities with the variable of interest on x axis
+
+predict_and_plot <- function(variable_of_interest, model, data) {
+  # Werte für jede Variable von Interesse
+  age_values <- seq(from = min(data$age,na.rm=TRUE),to=max(data$age, na.rm = TRUE), length.out = 10)  # 10 Werte für Alter
+  inpat_id_values <- seq(from = min(data$inpat_id,na.rm=TRUE),to=max(data$inpat_id, na.rm = TRUE), length.out = 9)  # 4 Werte für inpat_id
+  elix_sum_values <- seq(from = min(data$elix_sum,na.rm=TRUE),to=max(data$elix_sum, na.rm = TRUE), length.out = 5)  # 4 Werte für elix_sum  # Neue Daten je nach Variable von Interesse erstellen
+  if (variable_of_interest == "age") {
+    new_data <- expand.grid(
+      age = age_values,
+      sex = unique(data$sex),
+      emp.type=unique(data$emp.type),
+      inpat_id = mean(data$inpat_id, na.rm=TRUE),
+      elix_sum=mean(data$elix_sum, na.rm = TRUE)
+    )
+    x_label <- "Alter"
+  } else if (variable_of_interest == "inpat_id") {
+    new_data <- expand.grid(
+      age = mean(data$age, na.rm=TRUE),
+      sex = unique(data$sex),
+      emp.type=unique(data$emp.type),
+      inpat_id = inpat_id_values,
+      elix_sum=mean(data$elix_sum, na.rm = TRUE)
+    )
+    x_label <- "inpat ID"
+  } else if (variable_of_interest == "elix_sum") {
+    new_data <- expand.grid(
+      age = mean(data$age, na.rm=TRUE),
+      sex = unique(data$sex),
+      emp.type=unique(data$emp.type),
+      inpat_id = mean(data$inpat_id, na.rm=TRUE),
+      elix_sum= elix_sum_values
+    )
+    x_label <- "Elixhauser Sumscore"
+  } else {
+    stop("Ununterstützte Variable der Interesse.")
+  }
+  
+  # Dummy-Level für pragmaid hinzufügen, falls notwendig
+  if ("pragmaid" %in% colnames(data)) {
+    new_data$pragmaid <- levels(data$pragmaid)[1] # Nutze ein existierendes Level als Dummy
+  }
+  
+  # Vorhersagen berechnen
+  predicted_probs <- predict(model, newdata = new_data, type = "response")
+  
+  # Kombiniere die Vorhersagen mit den Eingabewerten
+  predicted_data <- cbind(new_data, predicted_probs)
+  
+  # Reshape die Daten für ggplot
+  predicted_long <- pivot_longer(predicted_data, 
+                                 cols = c("1-6 Tage", "7-20 Tage", "21+ Tage"), 
+                                 names_to = "treat_dur_cat", 
+                                 values_to = "predicted_prob")
+  
+  #change the order of the levels of treat_dur_cat
+  predicted_long$treat_dur_cat <- factor(predicted_long$treat_dur_cat, levels = c("1-6 Tage", "7-20 Tage", "21+ Tage"))
+  
+  # Plotten der vorhergesagten Wahrscheinlichkeiten
+  ggplot(predicted_long, aes(x = .data[[variable_of_interest]], y = predicted_prob, color = sex)) +
+    geom_line() +
+    facet_grid(treat_dur_cat ~ emp.type, scales = "free") +
+    xlab(x_label) +
+    ylab("Vorhergesagte Wahrscheinlichkeit") +
+    theme_minimal() +
+    labs(color = "Geschlecht") +
+    theme(legend.position = "bottom")
+}
+
+
+predict_and_plot("inpat_id", model8, final_data)
+predict_and_plot("age", model8, final_data)
+predict_and_plot("elix_sum", model8, final_data)
+
+#save plots in folder_plot
+ggsave(file.path(folder_plot, "INPAT_predicted_probs_inpatid.png"), predict_and_plot("inpat_id", model8, final_data), width = 20, height = 25, units = "cm")
+ggsave(file.path(folder_plot, "INPAT_predicted_probs_age.png"), predict_and_plot("age", model8, final_data), width = 20, height = 25, units = "cm")
+ggsave(file.path(folder_plot, "INPAT_predicted_probs_elix.png"), predict_and_plot("elix_sum", model8, final_data), width = 20, height = 25, units = "cm")
+
+```
+# Unterschiede zu QWT Modellen:
+- Wahrscheinlichkeit für 21+ Tage steigt mit steigendem Alter (QWT Modell: sinkt, 7-20 steigt bei beiden treatments)
+- Männer haben eine höhere Wahrscheinlichkeit für längere Aufenthlate (QWT Modell: Frauen), ist aber n.s. 
+- Effekt von Komorbidität hat zwar die gleiche Richtung, aber ist deutlicher stärker für INPAT 21+ Tage (höhere Wahrscheinlichkeit für längere Aufenthalte)
+- Effekt von IMPAT_ID ist in QWT Modell stärker, Richtung ist gleich (höhere ID, niedrigere Wahrscheinlichkeit für 21+ Tage Aufenthalte)
+
+
+# Interpretation der festen Effekte (Refernzgruppe 1-6 Tage)
+
+- kein signifikanter Effekt von Geschlecht
+- signifikant positiver Koeffizienten für Alter -> mit steigendem Alter steigt die Wahrscheinlichkeit für Behandlungen von 7-20 Tagen und 21+ Tagen im Vergleich zu 1-6 Tagen
+- signifikant negativer Koeffizient für inpat_ID -> mit fortlaufender QWT_ID sinkt die Wahrscheinlichkeit für Behandlungen 21+ Tagen (7-20 Tage n.s.)
+- signifikant negative Koeffizient für retired (Ref. employed) -> Personen in Rente haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt, sowohl vergleichen mit 7-20 Tagen als auch vergleichen mit 21+ Tagen
+- signifikant negative Koeffizient für unemployed (Ref. employed) -> Unbeschäftigte haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt vergleichen mit 21+ Tagen (7-20 Tage n.s.)
+- signifikant positiver Koeffizient für elix_sum -> je höher der Elixhauser Score, desto höher die Wahrscheinlichkeit für einen längeren Aufenthalt (7-20 und 21+ Tage)
 
 
 
@@ -655,7 +751,7 @@ Ergebnisse aus Model 8:
 
 probabilities <- predict(model8, type = "response")
 #dataset with only continuous variables
-final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, char_sum)))
+final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, elix_sum)))
 
 predictors <- colnames(final_data_cont)
 
