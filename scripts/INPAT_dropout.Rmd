@@ -730,6 +730,12 @@ ggsave(file.path(folder_plot, "INPAT_predicted_probs_elix.png"), predict_and_plo
 - Effekt von Komorbidität hat zwar die gleiche Richtung, aber ist deutlicher stärker für INPAT 21+ Tage (höhere Wahrscheinlichkeit für längere Aufenthalte)
 - Effekt von IMPAT_ID ist in QWT Modell stärker, Richtung ist gleich (höhere ID, niedrigere Wahrscheinlichkeit für 21+ Tage Aufenthalte)
 
+# Gemeinsamkeiten zu QWT Modellen:
+- Effekt Alter(positiv)
+- Effekt von Komorbidität (positiv) - jedoch char bei QWT vs. elix bei INPAT
+- Effekt von treatment_ID (negativ)
+- Effekt von Beschäftigung (positiv) - beschäftigt = längere Aufenthalte
+
 
 # Interpretation der festen Effekte (Refernzgruppe 1-6 Tage)
 
