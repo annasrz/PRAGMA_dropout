@@ -104,7 +104,7 @@ Die DRV Daten enthalten die ENTL (Entlassform) und die Diagnose-Veränderungs Va
 
 ```{r get hivid}
 reha <- left_join(reha, pragma_id_GKV %>% select(c("hivid", "pragmaid")), by = "pragmaid")
-reha <- left_join(reha, drvreha_specifics %>% select(c("hivid", "DIAG_VERAEND", "ENTLASSFORM")), by = "hivid")
+reha <- left_join(reha, drvreha_specifics %>% select(c("hivid", "DIAG_VERAEND", "ENTLASSFORM")), by = "hivid") #funktioniert nicht, da hivid in reha nicht vorhanden ist (hivid wurde wahrscheinlich in der zwischenzeit neu generiert)
 
 #filter for BEWILLDIAG starting with F10
 drv_reha_test <- drvreha_specifics %>% filter(BEWILLDIAG %like% "F10" | DIAG_GRUPPE %like% "Störungen durch Alkohol" | DIAG1 %like% "F10")
@@ -170,3 +170,22 @@ Eine Standardtherapie bei Alkohol und Medikamentenabhängigkeit kann bis 15 Woch
 Ganztägig ambulant: bis zu 17 Wochen (etwa 100 Tage)
 
 Ambulante: dauert in der Regel 6 bis 12, maximal 18 Monate.
+
+Auf Basis der empirischen Verteilungen und der Infos zur Standardlänge der verschiedenen Reha-Arten wird folgende Operationalisierung vorgenommen:
+
+Dreistufige Variable wie für QE (früher Abbruch, später Abbruch, kein Abbruch), definiert je nach Versorgungssetting
+
+ambulant (hier sieht man gut drei Peaks unter "gebessert" bei etwa 6, 12, 18 Monaten)
+kein Abbruch: >= 180 Tage & "gebessert"
+später Abbruch: (>= 120 Tage & < 180 Tage) oder (>= 180 Tage & nicht "gebessert")
+früher Abbruch: < 120 Tage
+
+ganztägig ambulant (dauert regulär circa 17 Wochen, das spiegelt sich auch gut in den Daten)
+kein Abbruch: >= 90 Tage
+später Abbruch: >= 60 Tage & < 90 Tage
+früher Abbruch: < 60 Tage
+
+stationär (regulär mindestens 56 Tage)
+kein Abbruch: >= 56 Tage & "gebessert"
+später Abbruch: (>= 30 Tage & < 56 Tage) oder (>= 56 Tage & nicht "gebessert")
+früher Abbruch: < 30 Tage
