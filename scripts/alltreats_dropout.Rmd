@@ -133,7 +133,7 @@ ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = ele
 # Check Zeiträume
 ```{r check_dates}
 #are there any overlaps between treatments within pragmaid?
-# Angenommen, qwt_inpat ist Ihr Data Frame
+
 overlap_check <- qwt_inpat %>%
   group_by(pragmaid) %>%
   # Sortieren nach dem Behandlungsstartdatum
