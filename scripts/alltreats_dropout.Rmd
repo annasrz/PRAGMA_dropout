@@ -1,0 +1,219 @@
+---
+title: "Predictors of treatment sucess (dropout) in alcohol-related treatments"
+author: "Anna"
+date: "2024-08-07"
+output: 
+  html_document:
+    code_folding: hide
+---
+# To-Dos
+
+- ....
+
+# Treatments
+
+QWT: qualifizierter Entzug. inkludiert Entgiftung und anschließende psychosoziale Versorgung. OPS Codes: 8-985 und 9-647. Diagnosen: a) F10.2-4 ICD-10 code als Hauptdiagnose oder b) eine F10 ICD-10 Hauptdiagnose und F10.2 als Nebendiagnose.
+
+INPAT: stationäre, alkoholbezogene Kontakte (Haupt- oder Fachabteilungsdiagnose Alkohol), die KEIN qualifizierter Entzug (QWT) sind. OPS Codes: 9-60x; 9-61x; 9-62x
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = -1)
+```
+# Vorbereitungen
+
+```{r essentials}
+# clean workspace
+rm(list=ls())
+packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet")
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+# Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+
+# current date:
+DATE <- format(Sys.Date(), "%Y%m%d")
+
+# themes and options
+options(scipen = 999)
+
+# output folders
+folder_table <- file.path("..", "output/tables")
+folder_plot <- file.path("..", "output/figures")
+
+if (!file.exists(folder_table)) {
+  dir.create(folder_table, recursive = TRUE)
+}
+
+if (!file.exists(folder_plot)) {
+  dir.create(folder_plot, recursive = TRUE)
+}
+```
+
+# Daten Import
+
+```{r data_import}
+print(getwd())
+datapath <- file.path("..", "input") 
+#read in all files in datapath 
+filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
+
+#save all files as separate dataframes
+ldf <- lapply(filenames, readRDS)
+names(ldf) <- gsub(".rds", "", basename(filenames))
+print(names(ldf))
+names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha")
+names(ldf) <- names
+#check if all dataframes are loaded
+ls()
+list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
+rm(ldf)
+```
+
+# Daten Vorbereitung
+
+## Outcome Variable (früher Abbruch, später Abbruch, kein Abbruch)
+```{r data_prep}
+#add Anzahl Tage in Behandlung
+qwt <- qwt %>% 
+  mutate(n.days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
+
+inpat$n.days <- as.numeric(inpat$n.days)
+
+boxplot(qwt$n.days) # keine Ausreißer
+boxplot(inpat$n.days) #sehr viele Ausreißer, Maximum 365 Tage
+
+#INPAT has many outliers, remove them
+cutoff_ndays_inpat <- quantile(inpat$n.days, 0.75) + 3*IQR(inpat$n.days)
+cutoff_ndays_inpat 
+sum(inpat$n.days > cutoff_ndays_inpat) # 74 cases to remove
+inpat <- inpat %>% filter(n.days <= cutoff_ndays_inpat)
+
+# bind datasets for plotting purposes
+inpat$treatment <- "inpat"
+qwt$treatment <- "qwt"
+
+#rename 
+qwt <- qwt %>% rename(date.treat.start = date.qwt.start, date.treat.end = date.qwt.end)
+inpat <- inpat %>% rename(date.treat.start = date.inpat.start, date.treat.end = date.inpat.end)
+
+colnames <- c("date.treat.start", "date.treat.end", "ENTL301", "n.days", "treatment", "gkv", "pragmaid")
+
+#are colnames in qwt and inpat? 
+all(colnames %in% colnames(qwt))
+all(colnames %in% colnames(inpat))
+
+
+qwt_inpat <- bind_rows(
+  inpat %>% select(all_of(colnames)),
+  qwt %>% select(all_of(colnames)))
+
+#any NAs in date.treat.start or date.treat.end?
+sum(is.na(qwt_inpat$date.treat.start)) #0
+sum(is.na(qwt_inpat$date.treat.end)) #0
+
+#create outcome variable
+qwt_inpat <- qwt_inpat %>%
+  mutate(treat_dur_cat = factor(case_when(
+  #more than or 20 days in treatment
+  n.days >= 21 ~ 3,
+  #between 7 and 19 days (inclusive)
+  n.days >= 7 & n.days < 21 ~ 2,
+  #between 0 and 6 days (inclusive)
+  n.days >= 0 & n.days < 7 ~ 1,
+  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
+
+#check distribution
+ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~treatment)
+```
+# Check Zeiträume
+```{r check_dates}
+#are there any overlaps between treatments within pragmaid?
+# Angenommen, qwt_inpat ist Ihr Data Frame
+overlap_check <- qwt_inpat %>%
+  group_by(pragmaid) %>%
+  # Sortieren nach dem Behandlungsstartdatum
+  arrange(date.treat.start) %>%
+  summarize(
+    overlap = any(
+      (date.treat.start < lag(date.treat.end)))) %>%
+  filter(overlap) 
+
+# Anzeigen der Ergebnisse mit Überlappungen
+print(overlap_check) # 22 Patienten haben überlappende Behandlungen
+
+overlapping_treatments <- qwt_inpat %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(is_overlap = date.treat.start < lag(date.treat.end, default = first(date.treat.start))) %>%
+  ungroup()
+
+# Plot erstellen, um Überlappungen zu visualisieren
+ggplot(overlapping_treatments %>% filter(pragmaid %in% overlap_check$pragmaid), 
+       aes(y = pragmaid, color = treatment)) +
+  geom_segment(aes(x = date.treat.start, 
+                   xend = date.treat.end, 
+                   yend = pragmaid, 
+                   alpha = as.factor(is_overlap), 
+                   size = as.factor(is_overlap))) +
+  scale_size_manual(values = c(`FALSE` = 5, `TRUE` = 5), guide = "none") +
+  scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1), guide = "none") +
+  labs(x = "Date", y = "Pragma ID", color = "Treatment") +
+  theme_minimal()
+
+# remove overlapping treatments
+
+qwt_inpat <- overlapping_treatments %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(
+    previous_length = lag(n.days, default = 0),  # Vorherige Behandlungsdauer
+    overlap_check = is_overlap & !is.na(previous_length),  # Check für Überlappungen mit vorherigen Fällen
+    action = case_when(
+      overlap_check & (n.days > previous_length) ~ "keep",
+      overlap_check & (n.days <= previous_length) ~ "remove",
+      TRUE ~ "not related"   # Alle anderen (nicht betroffenen) Fälle
+    )
+  ) %>%
+  ungroup()
+
+table(qwt_inpat$action, useNA = "always")
+
+qwt_inpat <- qwt_inpat %>% 
+  group_by(pragmaid) %>%
+  mutate(action = case_when(
+    lead(action == "keep") & lead(n.days) > n.days ~ "remove",
+    TRUE ~ action)) %>%
+  ungroup()
+
+table(qwt_inpat$action, useNA = "always") # okay
+
+qwt_inpat <- qwt_inpat %>% 
+  filter(action != "remove") %>%
+  select(-c(is_overlap, previous_length, overlap_check, action))
+
+```
+
+# Prädiktoren
+
+## Treatment ID
+```{r treat_id}
+#correct inpat_id, so that it is ordered by date.inpat.start
+qwt_inpat <- qwt_inpat %>% 
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(id_across_treat = row_number()) %>%
+  ungroup() %>%
+  group_by(pragmaid, treatment) %>%
+  arrange(date.treat.start) %>%
+  mutate(id_within_treat = row_number()) %>%
+  ungroup()
+
+```
+
+
+
