@@ -110,10 +110,6 @@ IQR(inpat$n.days)
 #check outliers
 boxplot(qwt$n.days)
 boxplot(inpat$n.days) #sehr viele Ausreißer, Maximum 365 Tage
-inpat_wooutliers <- inpat %>% filter(n.days < quantile(n.days, 0.75) + 3*IQR(n.days))
-#how many cases are removed?
-nrow(inpat) - nrow(inpat_wooutliers) #78 cases with ndays more than 3 IQRs away from the median
-#show cases with n.days > 3 IQRs
 
 # bind datasets for plotting purposes
 inpat$dataset <- "inpat"
@@ -169,6 +165,104 @@ qwt_inpat <- qwt_inpat %>%
 ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
 
 ```
+
+# Check Zeiträume
+```{r check_dates}
+
+#DIREKTE ANSCHLÜSSE
+#wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
+
+inpat <- inpat %>%
+  arrange(pragmaid, date.inpat.start) %>%
+  group_by(pragmaid) %>%
+  mutate(
+    direkter_anschluss = date.inpat.start == lag(date.inpat.end, default = NULL))
+
+table(inpat$direkter_anschluss, useNA = "always") #14 with direkter anschluss
+
+#check -> okay
+inpat %>% arrange(pragmaid, date.inpat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.inpat.start, date.inpat.end)
+
+inpat <- inpat %>% 
+  group_by(pragmaid) %>%
+  arrange(date.inpat.start) %>%
+  mutate(
+    date.inpat.start = case_when(
+      direkter_anschluss ~ lag(date.inpat.start),
+      TRUE ~ date.inpat.start
+    )
+  ) %>%
+  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
+  ungroup()
+
+#are there any OVERLAPS between treatments within pragmaid?
+
+overlap_check <- inpat %>%
+  group_by(pragmaid) %>%
+  summarize(
+    overlap = any(sapply(1:n(), function(i) {
+    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] >= date.inpat.start[-i])
+  }))) %>%
+  filter(overlap)  
+
+# Anzeigen der Ergebnisse mit Überlappungen
+print(overlap_check) # 15 Patienten haben überlappende Behandlungen
+
+inpat$overlap <- FALSE
+
+inpat <- inpat %>%
+  group_by(pragmaid) %>%
+  mutate(overlap = sapply(1:n(), function(i) {
+    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] >= date.inpat.start[-i])
+  }))
+
+table(inpat$overlap, useNA = "always") #45 cases with overlap
+
+# Plot erstellen, um Überlappungen zu visualisieren
+ggplot(inpat %>% filter(pragmaid %in% overlap_check$pragmaid), 
+       aes(y = pragmaid)) +
+  geom_segment(aes(x = date.inpat.start, 
+                   xend = date.inpat.end, 
+                   yend = pragmaid, 
+                   alpha = as.factor(overlap)),
+               size = 5) +
+  scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1)) +
+  labs(x = "Date", y = "Pragma ID") +
+  theme_minimal() #some overlaps are not visible, as they are very short (1 day)
+
+# remove overlapping treatments
+cases_to_remove <- inpat %>% 
+  filter(overlap == TRUE) %>%
+  group_by(pragmaid) %>%
+  arrange(pragmaid, date.inpat.start) %>%
+  mutate(group_overlap = cumsum(
+      coalesce(
+        as.logical(date.inpat.start > lag(date.inpat.end, n = 1, default = first(date.inpat.start)) &
+                   date.inpat.start > lag(date.inpat.end, n = 2, default = first(date.inpat.start)) &
+                   date.inpat.start > lag(date.inpat.end, n = 3, default = first(date.inpat.start))
+        ), TRUE
+      ))) %>%
+  group_by(pragmaid, group_overlap) %>%
+  mutate(keep = case_when(
+    n.days == max(n.days) ~ "keep",
+    TRUE ~ "remove"
+  ))
+  
+cases_to_remove %>% arrange(pragmaid, date.inpat.start) %>% select(pragmaid, date.inpat.start, date.inpat.end, overlap, group_overlap, keep)
+
+#common columns in cases_to_remove and inpat
+common_cols <- intersect(names(cases_to_remove), names(inpat))
+
+sum(cases_to_remove$keep == "remove")
+
+#inpat: remove cases with keep == "remove" in test
+inpat <- inpat %>% 
+  left_join(cases_to_remove, by = common_cols) %>%
+  filter(is.na(keep) | keep == "keep") %>%
+  select(-c(overlap, group_overlap, keep, direkter_anschluss))
+
+```
+
 # Prädiktoren
 
 ## Validierung qwt_id
@@ -632,7 +726,7 @@ choose_best_model <- function(summary_df, criterion) {
   return(best_model_row)
 }
 
-choose_best_model(model_summaries, "BIC") #Model 3 hat den besten fit
+choose_best_model(model_summaries, "BIC") #Model 1 (Intercept) hat den besten fit
 choose_best_model(model_summaries, "AIC") #Model 8 hat den besten fit
 choose_best_model(model_summaries, "Deviance") #Model 11 hat den besten fit
 
