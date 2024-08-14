@@ -76,22 +76,14 @@ rm(ldf)
 
 # Daten Vorbereitung
 
-## Outcome Variable (früher Abbruch, später Abbruch, kein Abbruch)
-```{r data_prep}
+
+## Treatments zu gemeinsamen Datensatz zusammenführen
+```{r data_bind}
 #add Anzahl Tage in Behandlung
 qwt <- qwt %>% 
   mutate(n.days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
 
 inpat$n.days <- as.numeric(inpat$n.days)
-
-boxplot(qwt$n.days) # keine Ausreißer
-boxplot(inpat$n.days) #sehr viele Ausreißer, Maximum 365 Tage
-
-#INPAT has many outliers, remove them
-cutoff_ndays_inpat <- quantile(inpat$n.days, 0.75) + 3*IQR(inpat$n.days)
-cutoff_ndays_inpat 
-sum(inpat$n.days > cutoff_ndays_inpat) # 74 cases to remove
-inpat <- inpat %>% filter(n.days <= cutoff_ndays_inpat)
 
 # bind datasets for plotting purposes
 inpat$treatment <- "inpat"
@@ -116,6 +108,155 @@ qwt_inpat <- bind_rows(
 sum(is.na(qwt_inpat$date.treat.start)) #0
 sum(is.na(qwt_inpat$date.treat.end)) #0
 
+#recode ENTL301
+
+qwt_inpat$ENTL301 <- factor(qwt_inpat$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 14, 15, 17, 22), labels = c("regulär", "beendet, nachstat. Beh. vorgesehen", "aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "Verlegung in ein anderes Krankenhaus", "Tod", "Rehaeinrichtung",
+"Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."))
+#was passiert nach interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG?
+
+ggplot(qwt_inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~treatment)
+sum(qwt_inpat$ENTL301 == "Tod") # 4 cases)
+
+qwt_inpat <- qwt_inpat %>% filter(ENTL301 != "Tod") # 4 cases removed
+
+
+```
+
+# Check Zeiträume
+```{r check_dates}
+
+## DIREKTE ANSCHLÜSSE
+#wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
+
+qwt_inpat <- qwt_inpat %>%
+  arrange(pragmaid, date.treat.start) %>%
+  group_by(pragmaid, treatment) %>%
+  mutate(
+    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+
+table(qwt_inpat$direkter_anschluss, useNA = "always") #79 with direkter anschluss
+
+#check -> okay
+qwt_inpat %>% arrange(pragmaid, date.treat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(treatment, pragmaid, date.treat.start, date.treat.end)
+
+# direkte anschlüsse zusammenfassen
+qwt_inpat <- qwt_inpat %>% 
+  group_by(pragmaid, treatment) %>%
+  arrange(date.treat.start) %>%
+  mutate(
+    date.treat.start = case_when(
+      direkter_anschluss ~ lag(date.treat.start),
+      TRUE ~ date.treat.start
+    )
+  ) %>%
+  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
+  ungroup()
+
+## are there any OVERLAPS between treatments within pragmaid?
+
+overlap_check <- qwt_inpat %>%
+  group_by(pragmaid) %>%
+  summarize(
+    overlap = any(sapply(1:n(), function(i) {
+    any(date.treat.start[i] < date.treat.end[-i] & date.treat.end[i] > date.treat.start[-i])
+  }))) %>%
+  filter(overlap)  
+
+# Anzeigen der Ergebnisse mit Überlappungen
+print(overlap_check) # 26 Patienten haben überlappende Behandlungen
+
+qwt_inpat$overlap <- FALSE
+
+qwt_inpat <- qwt_inpat %>%
+  group_by(pragmaid) %>%
+  mutate(overlap = sapply(1:n(), function(i) {
+    any(date.treat.start[i] < date.treat.end[-i] & date.treat.end[i] > date.treat.start[-i])
+  }))
+
+table(qwt_inpat$overlap, useNA = "always") #73 cases with overlap
+
+# Plot erstellen, um Überlappungen zu visualisieren
+ggplot(qwt_inpat %>% filter(pragmaid %in% overlap_check$pragmaid), 
+       aes(y = pragmaid)) +
+  geom_segment(aes(x = date.treat.start, 
+                   xend = date.treat.end, 
+                   yend = pragmaid, 
+                   alpha = as.factor(overlap),
+               color = as.factor(treatment)),
+               linewidth = 5) +
+  scale_alpha_manual(values = c(`FALSE` = 0.2, `TRUE` = 0.75)) +
+  labs(x = "Date", y = "Pragma ID") +
+  theme_minimal() #some overlaps are not visible, as they are very short (1 day)
+
+qwt_inpat %>% filter(pragmaid %in% overlap_check$pragmaid) %>% arrange(pragmaid, date.treat.start) %>% select(pragmaid, treatment, date.treat.start, date.treat.end, overlap)
+
+
+
+# remove overlapping treatments -> keep only the longest treatment
+cases_to_remove <- qwt_inpat %>% 
+  filter(overlap == TRUE) %>%
+  group_by(pragmaid) %>%
+  arrange(pragmaid, date.treat.start) %>%
+  mutate(group_overlap = cumsum(
+      coalesce(
+        as.logical(date.treat.start > lag(date.treat.end, n = 1, default = first(date.treat.start)) &
+                   date.treat.start > lag(date.treat.end, n = 2, default = first(date.treat.start)) &
+                   date.treat.start > lag(date.treat.end, n = 3, default = first(date.treat.start))
+        ), TRUE
+      ))) %>%
+  group_by(pragmaid, group_overlap) %>%
+  mutate(keep = case_when(
+    n.days == max(n.days) & row_number() == sample(which(n.days == max(n.days)), 1) ~ "keep", # wenn mehrere Einträge das Maximum darstellen, wird einer zufällig mit "keep" markiert, die anderen mit "remove"
+    n.days == max(n.days) ~ "remove", # alle anderen Einträge, die das Maximum erreichen, aber nicht zufällig ausgewählt wurden, werden mit "remove" markiert
+    TRUE ~ "remove"
+  ))
+  
+cases_to_remove %>% arrange(pragmaid, date.treat.start) %>% select(pragmaid, treatment, date.treat.start, date.treat.end, overlap, group_overlap, keep)
+
+#common columns in cases_to_remove and qwt
+common_cols <- intersect(names(cases_to_remove), names(qwt_inpat))
+
+sum(cases_to_remove$keep == "remove") #41 cases to remove
+
+#remove cases with keep == "remove" in cases_to_remove
+qwt_inpat <- qwt_inpat %>% 
+  left_join(cases_to_remove, by = common_cols) %>%
+  filter(is.na(keep) | keep == "keep") %>%
+  select(-c(overlap, group_overlap, keep, direkter_anschluss))
+
+```
+
+## Wie viele Treatments pro Patient*in?
+```{r check_ntreatments}
+#check how many treatments per patient
+treats_per_patient <- qwt_inpat %>% 
+  group_by(pragmaid, treatment) %>%
+  summarize(ntreatments = n())
+
+mean(treats_per_patient$ntreatments) #2
+tapply(treats_per_patient$ntreatments, treats_per_patient$treatment, summary) #means: inpat: 2.13, qwt: 1.97
+
+nrow(distinct(qwt_inpat, pragmaid)) # 2881 patients
+
+#how many patients did both a qwt and an inpat treatment?
+treats_per_patient %>%
+  group_by(pragmaid) %>% 
+  summarize(did_both = n() == 2) %>%
+  summarize(n = sum(did_both)) # 811 patients did both treatments, about 1/3 of all patients
+```
+
+
+## Outcome Variable (früher Abbruch, später Abbruch, kein Abbruch)
+```{r data_prep}
+boxplot(qwt_inpat$n.days[qwt_inpat$treatment == "qwt"]) # keine Ausreißer
+boxplot(qwt_inpat$n.days[qwt_inpat$treatment == "inpat"])  #sehr viele Ausreißer, Maximum 365 Tage
+
+#INPAT has many outliers, remove them
+cutoff_ndays_inpat <- quantile(qwt_inpat$n.days[qwt_inpat$treatment == "inpat"], 0.75) + 3 * IQR(qwt_inpat$n.days[qwt_inpat$treatment == "inpat"])
+cutoff_ndays_inpat 
+sum(qwt_inpat$n.days[qwt_inpat$treatment == "inpat"] > cutoff_ndays_inpat) # 74 cases to remove
+qwt_inpat <- qwt_inpat %>% filter(!(treatment == "inpat" & n.days > cutoff_ndays_inpat))
+
 #create outcome variable
 qwt_inpat <- qwt_inpat %>%
   mutate(treat_dur_cat = factor(case_when(
@@ -130,73 +271,7 @@ qwt_inpat <- qwt_inpat %>%
 #check distribution
 ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~treatment)
 ```
-# Check Zeiträume
-```{r check_dates}
-#are there any overlaps between treatments within pragmaid?
 
-overlap_check <- qwt_inpat %>%
-  group_by(pragmaid) %>%
-  # Sortieren nach dem Behandlungsstartdatum
-  arrange(date.treat.start) %>%
-  summarize(
-    overlap = any(
-      (date.treat.start < lag(date.treat.end)))) %>%
-  filter(overlap) 
-
-# Anzeigen der Ergebnisse mit Überlappungen
-print(overlap_check) # 22 Patienten haben überlappende Behandlungen
-
-overlapping_treatments <- qwt_inpat %>%
-  group_by(pragmaid) %>%
-  arrange(date.treat.start) %>%
-  mutate(is_overlap = date.treat.start < lag(date.treat.end, default = first(date.treat.start))) %>%
-  ungroup()
-
-# Plot erstellen, um Überlappungen zu visualisieren
-ggplot(overlapping_treatments %>% filter(pragmaid %in% overlap_check$pragmaid), 
-       aes(y = pragmaid, color = treatment)) +
-  geom_segment(aes(x = date.treat.start, 
-                   xend = date.treat.end, 
-                   yend = pragmaid, 
-                   alpha = as.factor(is_overlap), 
-                   size = as.factor(is_overlap))) +
-  scale_size_manual(values = c(`FALSE` = 5, `TRUE` = 5), guide = "none") +
-  scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1), guide = "none") +
-  labs(x = "Date", y = "Pragma ID", color = "Treatment") +
-  theme_minimal()
-
-# remove overlapping treatments
-
-qwt_inpat <- overlapping_treatments %>%
-  group_by(pragmaid) %>%
-  arrange(date.treat.start) %>%
-  mutate(
-    previous_length = lag(n.days, default = 0),  # Vorherige Behandlungsdauer
-    overlap_check = is_overlap & !is.na(previous_length),  # Check für Überlappungen mit vorherigen Fällen
-    action = case_when(
-      overlap_check & (n.days > previous_length) ~ "keep",
-      overlap_check & (n.days <= previous_length) ~ "remove",
-      TRUE ~ "not related"   # Alle anderen (nicht betroffenen) Fälle
-    )
-  ) %>%
-  ungroup()
-
-table(qwt_inpat$action, useNA = "always")
-
-qwt_inpat <- qwt_inpat %>% 
-  group_by(pragmaid) %>%
-  mutate(action = case_when(
-    lead(action == "keep") & lead(n.days) > n.days ~ "remove",
-    TRUE ~ action)) %>%
-  ungroup()
-
-table(qwt_inpat$action, useNA = "always") # okay
-
-qwt_inpat <- qwt_inpat %>% 
-  filter(action != "remove") %>%
-  select(-c(is_overlap, previous_length, overlap_check, action))
-
-```
 
 # Prädiktoren
 
@@ -212,8 +287,568 @@ qwt_inpat <- qwt_inpat %>%
   arrange(date.treat.start) %>%
   mutate(id_within_treat = row_number()) %>%
   ungroup()
+```
+
+## Hinzufügen der Stammdaten - SEX + AGE + NATIONALITY
+```{r add_stammdaten}
+#match pragma_id_GKV with inpat based on pragma_id to get sex and age information 
+total_stamm <- left_join(qwt_inpat, pragma_id_GKV, by="pragmaid")
+
+
+table(total_stamm$gkv.x, useNA = "always")
+table(total_stamm$gkv.y, useNA = "always") # 11 cases that are insured by both AOK and DAK (this information is not needed for the analysis, so keep only the insurence information from gkv.x)
+
+total_stamm <- total_stamm %>% 
+  select(c(-hivid, -gkv.id, -dak.id, -aok.id, - gkv.y)) %>%
+  mutate(age = as.integer(substr(date.treat.start, 1, 4)) - yob) %>% #calculate age at the beginning of the treatment
+  rename(gkv = gkv.x) #rename gkv.x to gkv
+
+total_stamm$pragmaid <- factor(total_stamm$pragmaid)
+total_stamm$gkv <- factor(total_stamm$gkv)
+total_stamm$sex <- as.factor(total_stamm$sex)
+total_stamm$nationality <- as.factor(total_stamm$nationality)
+
+table(total_stamm$sex, useNA = "always") # 0 NAs
+summary(total_stamm$age) # 0 NAs
+```
+## Hinzufügen Emplyoment Status
+```{r add_employment}
+nrow(distinct(total_stamm, pragmaid, id_across_treat)) #7557 Fälle
+employ_alltimes <- left_join(total_stamm, employment, by = "pragmaid")
+nrow(distinct(total_stamm, pragmaid, id_across_treat)) #7557 Fälle
+
+table(employ_alltimes$gkv.x, useNA = "always")
+table(employ_alltimes$gkv.y, useNA = "always") #not the same
+
+employ_alltimes <- employ_alltimes %>% 
+  select(- gkv.y) %>%
+  rename(gkv = gkv.x) #rename gkv.x to gkv
+
+employ_fil <- employ_alltimes %>%
+  filter(date.treat.start >= date.emp.start & date.treat.start <= date.emp.end)
+
+nrow(distinct(employ_fil, pragmaid, id_across_treat))
+nrow(employ_fil) - nrow(total_stamm) # there are 70 cases less than before - why?
+
+missing_rows <- total_stamm %>%
+  anti_join(employ_fil, by = c("pragmaid", "id_across_treat"))
+
+employment %>% filter(pragmaid %in% missing_rows$pragmaid) %>% group_by(pragmaid) # no employment data for the inpat duration of these cases - why? 
+```
+### Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
+```{r check_missing_employment}
+#check if missing employment data is due to interruptions in insured periods
+check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
+  select(pragmaid, date.treat.start, date.treat.end, date.ins.start, date.ins.end, gkv.x) 
+
+#filter cases where the inpat treatment is covered by insurance
+cases_with_valid_ins <- check_missing %>% filter(date.treat.start >= date.ins.start & date.treat.start <= date.ins.end) #there are 15 cases that do have insurance data for the inpatient treatment, but have no corresponding employment data. these cases should be kept in the inpat_employ dataset, as they are insured during the inpatient treatment and the employment status should be set to NA.
+
+# -> some, but not all cases with missing employment data are due to interruptions in insured periods
+
+#add cases with valid insurance to inpat_employ
+employ_fil <- bind_rows(employ_fil, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.treat.start %in% cases_with_valid_ins$date.treat.start & date.treat.end %in% cases_with_valid_ins$date.treat.end))
+
+table(employ_fil$emp.type, useNA = "always") # 15 NAs, so the 16 cases without employment infos, but with insurance are added to the inpat_employ dataset
+``` 
+## Hinzufügen von Diagnose-Daten
+
+```{r add_diagnoses}
+sum(is.na(all_diagnoses$pragmaid)) #158 -> why?
+
+table(all_diagnoses$icd_type)
+
+# keep only diagnoses of patients in inpat_employ, with icd_type confirmed, primary, secondary, any and that are not alcohol related
+diagnoses_alltimes <- all_diagnoses %>% 
+  filter(pragmaid %in% employ_fil$pragmaid) %>% #keep only rows that are in qwt_inpat data 
+  filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
+  filter(icd.alc == FALSE) %>%#keep only diaignoses that are not alcohol related (as all treatment cases are alcohol related)
+  mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
+
+#check
+nrow(distinct(employ_fil, pragmaid)) - nrow(distinct(diagnoses_alltimes, pragmaid)) # 3 patients do not have any diagnoses that matches the criteria
+
+summary(diagnoses_alltimes$length_diag)
+
+#plot histogram of length_diag
+ggplot(diagnoses_alltimes, aes(x = length_diag)) + geom_histogram(binwidth = 1) +
+  facet_wrap(~setting, scales = "free_y") +
+  scale_x_continuous(limits = c(0, 100))
+
+#show cases with NA in length_diag
+diagnoses_alltimes %>% 
+  filter(is.na(date.diag.start)) %>%
+  select(pragmaid, icd, icd_type, setting, date.diag.start, date.diag.end)
+
+#delete length_diag
+diagnoses_alltimes <- select(diagnoses_alltimes, -length_diag)
+
+# if date.diag.start is NA, set it to date.diag.end
+diagnoses_alltimes <- diagnoses_alltimes %>% 
+  mutate(date.diag.start = dplyr::if_else(is.na(date.diag.start), date.diag.end, date.diag.start))
+
+# join diagnoses with employ_fil
+diagnoses_employ_alltimes <- left_join(employ_fil, diagnoses_alltimes, by = c("pragmaid")) 
+
+#check
+nrow(distinct(diagnoses_employ_alltimes, pragmaid, id_across_treat)) #7502 -> okay
+
+# keep only diagnoses in the timeframe of interest (maximum 2 quarters before inpat start)
+diagnoses_employ_fil <- diagnoses_employ_alltimes %>%
+  filter(
+    #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor treatment-Start gestellt worden sein und maximal gleich treatment-Start liegen
+     date.diag.start >= (date.treat.start - days(180)) & date.diag.start <= date.treat.start)
+#Arbeitsdefinition, evtl für stationäre Diagnosen (bzw. alle anderen settings) Eingrenzung anpassen?
+
+sum(diagnoses_employ_fil$gkv.x != diagnoses_employ_fil$gkv.y) # 33 cases where the insurance information is not the same in the diagnoses data and the inpat data
+
+diagnoses_employ_fil %>% filter(gkv.x != gkv.y) #these cases all have source == aokdak, so there seems to be an overlap. however, as the gkv information is not that important, we keep the gkv information from the inpat data
+
+diagnoses_employ_fil <- diagnoses_employ_fil %>% 
+  select(-gkv.y) %>%
+  rename(gkv = gkv.x)
+
+nrow(distinct(diagnoses_employ_fil, pragmaid, id_across_treat)) #7458 (before 7502 - 44 cases were excluded as they did not have a diagnosis in the timeframe of interest - they will be added in the end again
+
+
+# Charlson and Elixhauser Comorbidity Index
+
+diagnoses_employ_fil$id_pragma_treat_across <- paste(diagnoses_employ_fil$pragmaid, diagnoses_employ_fil$id_across_treat, sep = "_")
+
+nrow(distinct(diagnoses_employ_fil, id_pragma_treat_across)) #7458-> okay 
+
+comorb_elix <- comorbidity::comorbidity(x=diagnoses_employ_fil, id = "id_pragma_treat_across",
+                                code = "icd",map="elixhauser_icd10_quan",
+                                assign0 = T, tidy.codes = T)
+print(head(comorb_elix))  
+comorb_char <- comorbidity::comorbidity(x=diagnoses_employ_fil, id = "id_pragma_treat_across",
+                                code = "icd",map="charlson_icd10_quan",
+                                assign0 = T,tidy.codes = T)
+print(head(comorb_char))  
+
+comorb_elix_sum <- comorb_elix %>%
+  #new column with row sums using all columns except id_pragma_treat_across
+  mutate(elix_sum = rowSums(select(., -id_pragma_treat_across))) %>%
+  select(id_pragma_treat_across, elix_sum)
+
+comorb_char_sum <- comorb_char %>%
+  #new column with row sums using all columns except id_pragma_treat_across
+  mutate(char_sum = rowSums(select(., -id_pragma_treat_across))) %>%
+  select(id_pragma_treat_across, char_sum)
+
+#bind both comorbidity dataframes
+comorb_sum <- left_join(comorb_elix_sum, comorb_char_sum, by = "id_pragma_treat_across")
+print(head(comorb_sum))      
+
+nrow(distinct(employ_fil, pragmaid, id_across_treat)) - nrow(distinct(comorb_sum, id_pragma_treat_across)) #44 cases, these have to be added to the comorb_sum dataset 
+
+employ_fil$id_pragma_treat_across <- paste(employ_fil$pragmaid, employ_fil$id_across_treat, sep = "_")
+
+diagnoses_employ <- left_join(employ_fil, comorb_sum, by = "id_pragma_treat_across")
+
+#are there missings? 
+nrow(employ_fil) - nrow(diagnoses_employ) #0
+sum(is.na(diagnoses_employ$elix_sum)) #44 missings
+sum(is.na(diagnoses_employ$char_sum)) #44 missings
+
+#set NAs to 0
+diagnoses_employ <- diagnoses_employ %>% 
+  mutate(elix_sum = replace_na(elix_sum, 0),
+         char_sum = replace_na(char_sum, 0))
+```
+
+### Diagnose Daten Descriptives 
+```{r check_ndiagnoses}
+#plot histogram of number of diagnoses
+ggplot(diagnoses_employ, aes(x = elix_sum)) + geom_histogram(binwidth = 1) + facet_grid(treat_dur_cat~treatment, scales = "free") 
+tapply(diagnoses_employ$elix_sum, diagnoses_employ$treatment, summary)
+
+ggplot(diagnoses_employ, aes(x = char_sum)) + geom_histogram(binwidth = 1) + facet_grid(treat_dur_cat~treatment, scales = "free")
+tapply(diagnoses_employ$char_sum, diagnoses_employ$treatment, summary)
+```
+## Hinzufügen von Pflegegraden
+```{r add_pflegegrad}
+table(fosterage$fost.degree, useNA = "always")
+# sowohl Pflegegrade (PG) als auch Pflegestufen (PS). Pflegegrade sind ab 2017 gültig, Pflegestufen bis 2016. Wie Pflegestufen in Pflegegrade umrechnen?
+
+fost <- fosterage %>% 
+  filter(pragmaid %in% diagnoses_employ$pragmaid)
+
+#checks
+sum(is.na(fost$pragmaid)) #0
+sum(is.na(fost$date.fost.start)) #0
+nrow(distinct(diagnoses_employ, pragmaid)) - nrow(distinct(fost, pragmaid)) #2482 patients do not have fosterage data, 382 have
+
+
+fost_diagnoses_employ_alltimes <- left_join(diagnoses_employ, fost, by = "pragmaid")
+
+
+fost_diagnoses_employ_fil <- fost_diagnoses_employ_alltimes %>%
+  filter((date.treat.start >= date.fost.start & is.na(date.fost.end)) | (date.treat.start >= date.fost.start & date.treat.start <= date.fost.end))
+
+nrow(distinct(fost_diagnoses_employ_fil, pragmaid)) # 192 patients do have a pflegegrad/stufe during the beginning of the  treatment
+
+# GKV X - GKV Y
+sum(fost_diagnoses_employ_fil$gkv.x != fost_diagnoses_employ_fil$gkv.y) # 0 cases where the insurance information is not the same in the fosterage data and the inpat data
+fost_diagnoses_employ_fil <- fost_diagnoses_employ_fil %>% 
+  select(-gkv.y) %>%
+  rename(gkv = gkv.x) %>% 
+  ungroup()
+
+#add fosterage data to diagnoses_inpat_employ and set fosterage to NA if there is no fosterage data
+fost_diagnoses_employ <- diagnoses_employ %>% 
+  left_join(fost_diagnoses_employ_fil %>% select(id_pragma_treat_across, fost.degree), by = "id_pragma_treat_across") %>%
+  mutate(fost.degree_bin = as.factor(ifelse(is.na(fost.degree), "nein", "ja"))) 
+
+table(fost_diagnoses_employ$fost.degree_bin, useNA = "always") #395 cases with fosterage degree-> okay
+
+```
+## Hinzufügen von Medikation
+
+```{r add_medication}
+med <- medications %>% 
+  filter(pragmaid %in% fost_diagnoses_employ$pragmaid)
+
+#checks
+sum(is.na(med$pragmaid)) #0
+sum(is.na(med$date.med.start)) #0
+nrow(distinct(fost_diagnoses_employ, pragmaid)) - nrow(distinct(med, pragmaid)) #92 patients do not have medication data, 2772 have
+
+med_fost_diagnoses_employ_alltimes <- left_join(fost_diagnoses_employ, med, by = "pragmaid")
+nrow(distinct(med_fost_diagnoses_employ_alltimes, pragmaid)) # 2864 -> okay
+
+med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_alltimes %>%
+  # only keep medication data that happened during the 3 months before the treatment
+  filter(date.medi.disp >= (date.treat.start - days(30)) & date.medi.disp <= date.treat.start) %>%
+  filter(ATC != "")
+
+nrow(distinct(med_fost_diagnoses_employ_fil, id_pragma_treat_across)) # 2933 treatments have medication data in the timeframe of interest
+
+#GKV X - GKV Y
+sum(med_fost_diagnoses_employ_fil$gkv.x != med_fost_diagnoses_employ_fil$gkv.y) # 2 cases where the insurance information is not the same in the medication data and the inpat data
+med_fost_diagnoses_employ_fil %>% 
+  filter(gkv.x != gkv.y) #these cases all have source == aokdak, so there seems to be an overlap. however, as the gkv information is not that important, we keep the gkv information from the inpat data
+med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>% 
+  select(-c(gkv.y, REZ_ID, LANR_FAGS, date.medi.presc, PZN_ANZ, DDD1000_PK)) %>%
+  rename(gkv = gkv.x) %>%
+  ungroup()
+
+#new variable with level 2 ATCs (therapeutische Untergruppe)
+med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>% 
+  mutate(Level2_ATC = substr(ATC, 1, 3)) %>%
+  ungroup()
+
+#how many different values of Level2_ATC are there? 
+unique_level2_ATCs <- unique(med_fost_diagnoses_employ_fil$Level2_ATC)
+length(unique_level2_ATCs) #72
+
+# welche Untergruppe ist am häufigsten vertreten?
+sorted_atc_counts <- med_fost_diagnoses_employ_fil %>%
+  count(Level2_ATC, sort = TRUE) #Psycholeptika (N05) kommt am häufigsten vor
+
+#calculate sum of distinct full ATC and level 2 ATC codes
+med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>%
+  group_by(id_pragma_treat_across) %>%
+  dplyr::summarize(ndistinctATClevel2 = n_distinct(Level2_ATC), 
+            ndistinctATC = n_distinct(ATC)) %>%
+  ungroup()
+
+table(med_fost_diagnoses_employ_fil$ndistinctATClevel2)
+
+med_fost_diagnoses_employ <- left_join(fost_diagnoses_employ, med_fost_diagnoses_employ_fil, by = "id_pragma_treat_across")
+
+med_fost_diagnoses_employ <- med_fost_diagnoses_employ %>%
+  mutate(ndistinctATC = ifelse(is.na(ndistinctATC), 0, ndistinctATC)) %>%
+  mutate(ndistinctATClevel2 = ifelse(is.na(ndistinctATClevel2), 0, ndistinctATClevel2)) %>%
+  mutate(polymedi = as.factor(ifelse(ndistinctATC >= 6, "ja", "nein"))) %>%
+  mutate(polymedi_level2 = as.factor(ifelse(ndistinctATClevel2 >= 5, "ja", "nein")))
+
+tapply(med_fost_diagnoses_employ$ndistinctATClevel2, med_fost_diagnoses_employ$treatment, summary)
+ggplot(med_fost_diagnoses_employ, aes(x = ndistinctATClevel2)) + geom_histogram(binwidth = 1) + facet_grid(treat_dur_cat~treatment, scales = "free")
+```
+# Auswahl relevanter Variablen
+```{r select_vars}
+final_data <- med_fost_diagnoses_employ %>% 
+  select(-c(date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_treat_across, fost.degree, source, died, date.death, yob, ENTL301))
+```
+
+# Speicherplatz freigeben
+```{r save_data}
+#alle Datenfiles die "all" oder "check" oder "missing" im Namen haben, können gelöscht werden
+#identifiziere alle Objekte, die gelöscht werden können
+objects <- ls()
+objects <- objects[grepl("all|check|missing|fil", objects)]
+#lösche alle Objekte
+rm(list = objects)
+#free unused memory
+gc()
+```
+# Überprüfung der Daten vor Modellierung
+```{r check_data}
+final_data$treatment <- as.factor(final_data$treatment)
+final_data$emp.type <- as.factor(final_data$emp.type)
+#check for missings
+summary(final_data)
+anyNA(final_data) #15 NAs in EmpType -> set to "other"
+final_data$emp.type[is.na(final_data$emp.type)] <- "other"
+
+##outliers?
+## remove #all outliers that match the definition: bigger than 75% quantile + 3*IQR (Tukey's fences)
+
+# inpat_id
+boxplot(final_data$id_across_treat) # some patients did 30 treatments -> remove them?
+cutoff_treatid <- quantile(final_data$id_across_treat, 0.75) + 3*IQR(final_data$id_across_treat)
+cutoff_treatid
+#remove them
+final_data <- final_data %>% filter(id_across_treat <= cutoff_treatid)
+
+# ndays wurde schon zu Beginn bereinigt
+
+# char_sum
+boxplot(final_data$char_sum) # some outliers
+cutoff_char <- quantile(final_data$char_sum, 0.75) + 3*IQR(final_data$char_sum)
+cutoff_char
+sum(final_data$char_sum > cutoff_char) # 58 cases to remove
+final_data <- final_data %>% filter(char_sum <= cutoff_char)
+
+#elix_sum
+boxplot(final_data$elix_sum) # some outliers
+cuttoff_elix <- quantile(final_data$elix_sum, 0.75) + 3*IQR(final_data$elix_sum)
+cuttoff_elix
+sum(final_data$elix_sum > cuttoff_elix) # 10 cases to remove
+final_data <- final_data %>% filter(elix_sum <= cuttoff_elix)
+
+#ndistinctATClevel2
+boxplot(final_data$ndistinctATClevel2) # some outliers
+cutoff_ndistinctATClevel2 <- quantile(final_data$ndistinctATClevel2, 0.75) + 3*IQR(final_data$ndistinctATClevel2)
+cutoff_ndistinctATClevel2
+sum(final_data$ndistinctATClevel2 > cutoff_ndistinctATClevel2) # 224 cases to remove
+final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
+
+
+
+# check for multicollinearity
+#Just run “linear regression” after assuming categorical dependent variable as continuous variable
+final_data$treat_dur_cat_num <- as.numeric(final_data$treat_dur_cat)
+vif_model <- lm(treat_dur_cat_num ~ sex + age + id_across_treat + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treatment + treatment*sex, data = final_data)
+
+car::vif(vif_model) #no multicollinearity
+#"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 
 ```
 
+#Multinomiale Modelle
+```{r multinom_models}
+final_data$pragmaid <- as.factor(final_data$pragmaid)
+
+# Initialisiere einen leeren DataFrame für die Modellanpassungsparameter
+model_summaries <- data.frame(
+  Model = character(),
+  Deviance = numeric(),
+  AIC = numeric(),
+  BIC = numeric(),
+  stringsAsFactors = FALSE
+)
+
+add_model_summary <- function(model, model_name) {
+  summary <- getSummary.mblogit(model)
+  stats <- summary$sumstat
+  model_summaries <<- rbind(model_summaries, data.frame(
+    Model = model_name,
+    Deviance = stats["deviance"],
+    AIC = stats["AIC"],
+    BIC = stats["BIC"]
+  ))
+}
+
+#nur Intercept und random effects
+model1 <- mblogit(formula = treat_dur_cat ~ 1, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model1)
+add_model_summary(model1, "Intercept")
+
+model2 <- mblogit(formula = treat_dur_cat ~ treatment, random = ~ 1 | pragmaid, data = final_data) #model 2 führt zu deutlicher Verbesserung und treatment ist ein signifikanter Prädiktor
+getSummary.mblogit(model2)
+add_model_summary(model2, "Model 2")
+
+model3 <- mblogit(formula = treat_dur_cat ~ treatment + sex, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model3) #Modell 3 hat die besten Anpassungswerte basierend auf Devianz und AIC. sex scheint ein signifikanter Prädiktor für die Kategorie „21+ Tage“ im Vergleich zu „1-6 Tage“ zu sein.
+add_model_summary(model3, "Model 3")
+
+model4 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model4) #Modell 4 hat die besten Anpassungswerte basierend auf Devianz und AIC. sex*treatment ist hoch signifikant, haupteffekt sex verliert signifikanz -> Effekt von "qwt" im Verhältnis zu "inpat" bei Männern im Vergleich zu Frauen abgeschwächt.
+add_model_summary(model4, "Model 4")
+
+model5 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model5) #Modell 5 hat die besten Anpassungswerte basierend auf Devianz, AIC und BIC. age ist signifikanter prädiktor für längere treatments
+add_model_summary(model5, "Model 5")
+
+model6 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + age*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model6) #Modell 6 verbessert weder BIC noch AIC. age*treatment ist nicht signifikant -> wird nicht in das endgültige Modell aufgenommen
+add_model_summary(model6, "Model 6")
+
+model7 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model7) #Modell 7 hat die besten Anpassungswerte basierend auf Devianz, AIC und BIC. treatment_id verringert wahrscheinlichkeit für 21+ treatments signifikant
+add_model_summary(model7, "Model 7")
+
+model8 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model8) #Modell 8 hat die besten Anpassungswerte basierend auf Devianz, AIC und BIC
+add_model_summary(model8, "Model 8")
+
+model9 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model9) #Modell 9 hat die besten Anpassungswerte basierend auf Devianz und AIC. Nicht-deutsche Menschen haben eine signifikant gerinere Wahrscheinlichkeit für 21+ Behandlungen
+add_model_summary(model9, "Model 9")
+
+model10 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + nationality*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model10) #Modell 10 führt zu keiner Verbesserung der Anpassungswerte -> interaktion nationality*treatment wird nicht in das endgültige Modell aufgenommen
+add_model_summary(model10, "Model 10")
+
+model11 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model11) #Modell 11 hat die besten Anpassungswerte basierend auf Devianz und AIC. emp.type ist signifikanter prädiktor
+add_model_summary(model11, "Model 11")
+
+model12 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + emp.type*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model12) #Modell 12 führt zu keiner Verbesserung der Anpassungswerte -> interaktion emp.type*treatment wird nicht in das endgültige Modell aufgenommen
+add_model_summary(model12, "Model 12")
+
+model13 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + gkv, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model13) #Modell 13 führt zu keiner Verbesserung der Anpassungswerte -> gkv wird nicht in das endgültige Modell aufgenommen
+add_model_summary(model13, "Model 13")
+
+model14 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + elix_sum, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model14) #Modell 14 hat die besten Anpassungswerte basierend auf Devianz, AIC und BIC. elix_sum ist signifikanter prädiktor für längere treatments
+add_model_summary(model14, "Model 14")
+
+model15 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + elix_sum + elix_sum*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model15) #Modell 15 führt zu Verbesserung der Anpassungswerte -> elix_sum*treatment wird in das endgültige Modell aufgenommen
+add_model_summary(model15, "Model 15")
+
+#fitted der char_sum besser als elix_sum?
+model16 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + char_sum, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model16) #nein, elix_sum fitted besser
+add_model_summary(model16, "Model 16")
+
+model17 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + char_sum + char_sum*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model17) #nein, elix_sum fitted besser
+add_model_summary(model17, "Model 17")
+
+model18 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + elix_sum + elix_sum*treatment + ndistinctATClevel2, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model18) #Modell 18 führt zu Verbesserung der Anpassungswerte -> ndistinctlevel2 wird nicth in das endgültige Modell aufgenommen
+add_model_summary(model18, "Model 18")
+
+model19 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + elix_sum + elix_sum*treatment + ndistinctATClevel2*treatment, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model19) #auch nicht der Interaktionsterm
+add_model_summary(model19, "Model 19")
+
+model20 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + elix_sum + elix_sum*treatment + fost.degree_bin, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model20) #keine Verbesserung
+add_model_summary(model20, "Model 20")
+
+#find the best fitting model
+choose_best_model <- function(summary_df, criterion) {
+  if (!criterion %in% names(summary_df)) {
+    stop("Ungültiges Kriterium. Wähle entweder 'Deviance', 'AIC' oder 'BIC'.")
+  }
+  best_model_row <- summary_df[which.min(summary_df[[criterion]]), ]
+  return(best_model_row)
+}
+
+choose_best_model(model_summaries, "BIC") #Model 8 (Intercept) hat den besten fit
+choose_best_model(model_summaries, "AIC") #Model 15 hat den besten fit
+choose_best_model(model_summaries, "Deviance") #Model 19 hat den besten fit
 
 
+```
+
+# Predicted Probabilities 
+
+```{r plot_pred_probs}
+# Predicted probabilities
+# Erstelle ein neues Datenset, durch das die Variablen, die dich interessieren, variiert werden
+
+
+#define function to generate new data that varies the variables of interest (age, inpat_id, elix_sum) and then plot the predicted probabilities with the variable of interest on x axis
+
+predict_and_plot <- function(variable_of_interest, model, data) {
+  # Werte für jede Variable von Interesse
+  age_values <- seq(from = min(data$age,na.rm=TRUE),to=max(data$age, na.rm = TRUE), length.out = 10)  # 10 Werte für Alter
+  id_across_treat_values <- seq(from = min(data$id_across_treat,na.rm=TRUE),to=max(data$id_across_treat, na.rm = TRUE), length.out = 9)  # 4 Werte für inpat_id
+  elix_sum_values <- seq(from = min(data$elix_sum,na.rm=TRUE),to=max(data$elix_sum, na.rm = TRUE), length.out = 5)  # 4 Werte für elix_sum  # Neue Daten je nach Variable von Interesse erstellen
+  if (variable_of_interest == "age") {
+    new_data <- expand.grid(
+      age = age_values,
+      treatment = unique(data$treatment),
+      nationality = unique(data$nationality),
+      sex = unique(data$sex),
+      emp.type=unique(data$emp.type),
+      id_across_treat = mean(data$id_across_treat, na.rm=TRUE),
+      elix_sum=mean(data$elix_sum, na.rm = TRUE)
+    )
+    x_label <- "Alter"
+  } else if (variable_of_interest == "id_across_treat") {
+    new_data <- expand.grid(
+      age = mean(data$age, na.rm=TRUE),
+      treatment = unique(data$treatment),
+      nationality = unique(data$nationality),
+      sex = unique(data$sex),
+      emp.type=unique(data$emp.type),
+      id_across_treat = id_across_treat_values,
+      elix_sum=mean(data$elix_sum, na.rm = TRUE)
+    )
+    x_label <- "inpat ID"
+  } else if (variable_of_interest == "elix_sum") {
+    new_data <- expand.grid(
+      age = mean(data$age, na.rm=TRUE),
+      treatment = unique(data$treatment),
+      nationality = unique(data$nationality),
+      sex = unique(data$sex),
+      emp.type=unique(data$emp.type),
+      id_across_treat = mean(data$id_across_treat, na.rm=TRUE),
+      elix_sum= elix_sum_values
+    )
+    x_label <- "Elixhauser Sumscore"
+  } else {
+    stop("Ununterstützte Variable der Interesse.")
+  }
+  
+  # Dummy-Level für pragmaid hinzufügen, falls notwendig
+  if ("pragmaid" %in% colnames(data)) {
+    new_data$pragmaid <- levels(data$pragmaid)[1] # Nutze ein existierendes Level als Dummy
+  }
+  
+  # Vorhersagen berechnen
+  predicted_probs <- predict(model, newdata = new_data, type = "response")
+  
+  # Kombiniere die Vorhersagen mit den Eingabewerten
+  predicted_data <- cbind(new_data, predicted_probs)
+  
+  # Reshape die Daten für ggplot
+  predicted_long <- pivot_longer(predicted_data, 
+                                 cols = c("1-6 Tage", "7-20 Tage", "21+ Tage"), 
+                                 names_to = "treat_dur_cat", 
+                                 values_to = "predicted_prob")
+  
+  #change the order of the levels of treat_dur_cat
+  predicted_long$treat_dur_cat <- factor(predicted_long$treat_dur_cat, levels = c("1-6 Tage", "7-20 Tage", "21+ Tage"))
+  
+  # Plotten der vorhergesagten Wahrscheinlichkeiten
+  ggplot(predicted_long, aes(x = .data[[variable_of_interest]], y = predicted_prob, color = sex)) +
+    geom_line() +
+    facet_grid(treat_dur_cat ~ emp.type, scales = "free") +
+    xlab(x_label) +
+    ylab("Vorhergesagte Wahrscheinlichkeit") +
+    theme_minimal() +
+    labs(color = "Geschlecht") +
+    theme(legend.position = "bottom")
+}
+
+
+predict_and_plot("id_across_treat", model15, final_data)
+predict_and_plot("age", model15, final_data)
+predict_and_plot("elix_sum", model15, final_data)
+
+#save plots in folder_plot
+ggsave(file.path(folder_plot, "INPAT_predicted_probs_inpatid.png"), predict_and_plot("inpat_id", model8, final_data), width = 20, height = 25, units = "cm")
+ggsave(file.path(folder_plot, "INPAT_predicted_probs_age.png"), predict_and_plot("age", model8, final_data), width = 20, height = 25, units = "cm")
+ggsave(file.path(folder_plot, "INPAT_predicted_probs_elix.png"), predict_and_plot("elix_sum", model8, final_data), width = 20, height = 25, units = "cm")
+
+```
