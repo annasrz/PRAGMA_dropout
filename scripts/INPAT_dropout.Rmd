@@ -71,6 +71,107 @@ rm(ldf)
 ```
 # Daten vorbereiten
 
+## Check Zeiträume
+```{r check_dates}
+
+## DIREKTE ANSCHLÜSSE
+#wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
+
+inpat <- inpat %>%
+  arrange(pragmaid, date.inpat.start) %>%
+  group_by(pragmaid) %>%
+  mutate(
+    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+
+table(inpat$direkter_anschluss, useNA = "always") #14 with direkter anschluss
+
+#check -> okay
+inpat %>% arrange(pragmaid, date.inpat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.inpat.start, date.inpat.end)
+
+inpat <- inpat %>% 
+  group_by(pragmaid) %>%
+  arrange(date.inpat.start) %>%
+  mutate(
+    date.inpat.start = case_when(
+      direkter_anschluss ~ lag(date.inpat.start),
+      TRUE ~ date.inpat.start
+    )
+  ) %>%
+  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
+  ungroup()
+
+## are there any OVERLAPS between treatments within pragmaid?
+
+inpat$n.days <- as.integer(inpat$n.days)
+
+overlap_check <- inpat %>%
+  group_by(pragmaid) %>%
+  summarize(
+    overlap = any(sapply(1:n(), function(i) {
+    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] > date.inpat.start[-i])
+  }))) %>%
+  filter(overlap)  
+
+# Anzeigen der Ergebnisse mit Überlappungen
+print(overlap_check) # 15 Patienten haben überlappende Behandlungen
+
+inpat$overlap <- FALSE
+
+inpat <- inpat %>%
+  group_by(pragmaid) %>%
+  mutate(overlap = sapply(1:n(), function(i) {
+    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] > date.inpat.start[-i])
+  }))
+
+table(inpat$overlap, useNA = "always") #45 cases with overlap
+
+# Plot erstellen, um Überlappungen zu visualisieren
+ggplot(inpat %>% filter(pragmaid %in% overlap_check$pragmaid), 
+       aes(y = pragmaid)) +
+  geom_segment(aes(x = date.inpat.start, 
+                   xend = date.inpat.end, 
+                   yend = pragmaid, 
+                   alpha = as.factor(overlap)),
+               size = 5) +
+  scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1)) +
+  labs(x = "Date", y = "Pragma ID") +
+  theme_minimal() #some overlaps are not visible, as they are very short (1 day)
+
+# remove overlapping treatments
+cases_to_remove <- inpat %>% 
+  filter(overlap == TRUE) %>%
+  group_by(pragmaid) %>%
+  arrange(pragmaid, date.inpat.start) %>%
+  mutate(group_overlap = cumsum(
+      coalesce(
+        as.logical(date.inpat.start > lag(date.inpat.end, n = 1, default = first(date.inpat.start)) &
+                   date.inpat.start > lag(date.inpat.end, n = 2, default = first(date.inpat.start)) &
+                   date.inpat.start > lag(date.inpat.end, n = 3, default = first(date.inpat.start))
+        ), TRUE
+      ))) %>%
+  group_by(pragmaid, group_overlap) %>%
+  mutate(keep = case_when(
+    n.days == max(n.days) & row_number() == sample(which(n.days == max(n.days)), 1) ~ "keep",
+    n.days == max(n.days) ~ "remove",
+    TRUE ~ "remove"
+  ))
+  
+cases_to_remove %>% arrange(pragmaid, date.inpat.start) %>% select(pragmaid, date.inpat.start, date.inpat.end, overlap, group_overlap, keep)
+
+#common columns in cases_to_remove and inpat
+common_cols <- intersect(names(cases_to_remove), names(inpat))
+
+sum(cases_to_remove$keep == "remove")
+
+#inpat: remove cases with keep == "remove" in cases_to_remove
+inpat <- inpat %>% 
+  left_join(cases_to_remove, by = common_cols) %>%
+  filter(is.na(keep) | keep == "keep") %>%
+  select(-c(overlap, group_overlap, keep, direkter_anschluss))
+
+```
+
+
 ## Outcome Variablen Definition? 
 
 ### ENTLASS301
@@ -99,8 +200,6 @@ ggplot(inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(
 #add Anzahl Tage in Behandlung
 qwt <- qwt %>% 
   mutate(n.days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
-
-inpat$n.days <- as.numeric(inpat$n.days)
 
 
 summary(qwt$n.days)
@@ -163,103 +262,6 @@ qwt_inpat <- qwt_inpat %>%
 
 #check distribution
 ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
-
-```
-
-# Check Zeiträume
-```{r check_dates}
-
-#DIREKTE ANSCHLÜSSE
-#wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
-
-inpat <- inpat %>%
-  arrange(pragmaid, date.inpat.start) %>%
-  group_by(pragmaid) %>%
-  mutate(
-    direkter_anschluss = date.inpat.start == lag(date.inpat.end, default = NULL))
-
-table(inpat$direkter_anschluss, useNA = "always") #14 with direkter anschluss
-
-#check -> okay
-inpat %>% arrange(pragmaid, date.inpat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.inpat.start, date.inpat.end)
-
-inpat <- inpat %>% 
-  group_by(pragmaid) %>%
-  arrange(date.inpat.start) %>%
-  mutate(
-    date.inpat.start = case_when(
-      direkter_anschluss ~ lag(date.inpat.start),
-      TRUE ~ date.inpat.start
-    )
-  ) %>%
-  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
-  ungroup()
-
-#are there any OVERLAPS between treatments within pragmaid?
-
-overlap_check <- inpat %>%
-  group_by(pragmaid) %>%
-  summarize(
-    overlap = any(sapply(1:n(), function(i) {
-    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] >= date.inpat.start[-i])
-  }))) %>%
-  filter(overlap)  
-
-# Anzeigen der Ergebnisse mit Überlappungen
-print(overlap_check) # 15 Patienten haben überlappende Behandlungen
-
-inpat$overlap <- FALSE
-
-inpat <- inpat %>%
-  group_by(pragmaid) %>%
-  mutate(overlap = sapply(1:n(), function(i) {
-    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] >= date.inpat.start[-i])
-  }))
-
-table(inpat$overlap, useNA = "always") #45 cases with overlap
-
-# Plot erstellen, um Überlappungen zu visualisieren
-ggplot(inpat %>% filter(pragmaid %in% overlap_check$pragmaid), 
-       aes(y = pragmaid)) +
-  geom_segment(aes(x = date.inpat.start, 
-                   xend = date.inpat.end, 
-                   yend = pragmaid, 
-                   alpha = as.factor(overlap)),
-               size = 5) +
-  scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1)) +
-  labs(x = "Date", y = "Pragma ID") +
-  theme_minimal() #some overlaps are not visible, as they are very short (1 day)
-
-# remove overlapping treatments
-cases_to_remove <- inpat %>% 
-  filter(overlap == TRUE) %>%
-  group_by(pragmaid) %>%
-  arrange(pragmaid, date.inpat.start) %>%
-  mutate(group_overlap = cumsum(
-      coalesce(
-        as.logical(date.inpat.start > lag(date.inpat.end, n = 1, default = first(date.inpat.start)) &
-                   date.inpat.start > lag(date.inpat.end, n = 2, default = first(date.inpat.start)) &
-                   date.inpat.start > lag(date.inpat.end, n = 3, default = first(date.inpat.start))
-        ), TRUE
-      ))) %>%
-  group_by(pragmaid, group_overlap) %>%
-  mutate(keep = case_when(
-    n.days == max(n.days) ~ "keep",
-    TRUE ~ "remove"
-  ))
-  
-cases_to_remove %>% arrange(pragmaid, date.inpat.start) %>% select(pragmaid, date.inpat.start, date.inpat.end, overlap, group_overlap, keep)
-
-#common columns in cases_to_remove and inpat
-common_cols <- intersect(names(cases_to_remove), names(inpat))
-
-sum(cases_to_remove$keep == "remove")
-
-#inpat: remove cases with keep == "remove" in test
-inpat <- inpat %>% 
-  left_join(cases_to_remove, by = common_cols) %>%
-  filter(is.na(keep) | keep == "keep") %>%
-  select(-c(overlap, group_overlap, keep, direkter_anschluss))
 
 ```
 
