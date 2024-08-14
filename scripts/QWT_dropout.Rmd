@@ -65,6 +65,110 @@ ls()
 list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
 rm(ldf)
 ```
+# Check Zeiträume
+```{r check_dates}
+
+## DIREKTE ANSCHLÜSSE
+#wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
+
+qwt <- qwt %>%
+  arrange(pragmaid, date.qwt.start) %>%
+  group_by(pragmaid) %>%
+  mutate(
+    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+
+table(qwt$direkter_anschluss, useNA = "always") #6 with direkter anschluss
+
+#check -> okay
+qwt %>% arrange(pragmaid, date.qwt.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.qwt.start, date.qwt.end)
+
+# direkte anschlüsse zusammenfassen
+qwt <- qwt %>% 
+  group_by(pragmaid) %>%
+  arrange(date.qwt.start) %>%
+  mutate(
+    date.qwt.start = case_when(
+      direkter_anschluss ~ lag(date.qwt.start),
+      TRUE ~ date.qwt.start
+    )
+  ) %>%
+  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
+  ungroup()
+
+## are there any OVERLAPS between treatments within pragmaid?
+
+qwt <- qwt %>% 
+  mutate(n.days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
+
+overlap_check <- qwt %>%
+  group_by(pragmaid) %>%
+  summarize(
+    overlap = any(sapply(1:n(), function(i) {
+    any(date.qwt.start[i] < date.qwt.end[-i] & date.qwt.end[i] > date.qwt.start[-i])
+  }))) %>%
+  filter(overlap)  
+
+# Anzeigen der Ergebnisse mit Überlappungen
+print(overlap_check) # 13 Patienten haben überlappende Behandlungen
+
+qwt$overlap <- FALSE
+
+qwt <- qwt %>%
+  group_by(pragmaid) %>%
+  mutate(overlap = sapply(1:n(), function(i) {
+    any(date.qwt.start[i] < date.qwt.end[-i] & date.qwt.end[i] > date.qwt.start[-i])
+  }))
+
+table(qwt$overlap, useNA = "always") #27 cases with overlap
+
+# Plot erstellen, um Überlappungen zu visualisieren
+ggplot(qwt %>% filter(pragmaid %in% overlap_check$pragmaid), 
+       aes(y = pragmaid)) +
+  geom_segment(aes(x = date.qwt.start, 
+                   xend = date.qwt.end, 
+                   yend = pragmaid, 
+                   alpha = as.factor(overlap)),
+               linewidth = 5) +
+  scale_alpha_manual(values = c(`FALSE` = 0.2, `TRUE` = 0.6)) +
+  labs(x = "Date", y = "Pragma ID") +
+  theme_minimal() #some overlaps are not visible, as they are very short (1 day)
+
+# remove overlapping treatments -> keep only the longest treatment
+cases_to_remove <- qwt %>% 
+  filter(overlap == TRUE) %>%
+  group_by(pragmaid) %>%
+  arrange(pragmaid, date.qwt.start) %>%
+  mutate(group_overlap = cumsum(
+      coalesce(
+        as.logical(date.qwt.start > lag(date.qwt.end, n = 1, default = first(date.qwt.start)) &
+                   date.qwt.start > lag(date.qwt.end, n = 2, default = first(date.qwt.start)) &
+                   date.qwt.start > lag(date.qwt.end, n = 3, default = first(date.qwt.start))
+        ), TRUE
+      ))) %>%
+  group_by(pragmaid, group_overlap) %>%
+  mutate(keep = case_when(
+    n.days == max(n.days) & row_number() == sample(which(n.days == max(n.days)), 1) ~ "keep", # wenn mehrere Einträge das Maximum darstellen, wird einer zufällig mit "keep" markiert, die anderen mit "remove"
+    n.days == max(n.days) ~ "remove", # alle anderen Einträge, die das Maximum erreichen, aber nicht zufällig ausgewählt wurden, werden mit "remove" markiert
+    TRUE ~ "remove"
+  ))
+  
+cases_to_remove %>% arrange(pragmaid, date.qwt.start) %>% select(pragmaid, date.qwt.start, date.qwt.end, overlap, group_overlap, keep)
+
+#common columns in cases_to_remove and qwt
+common_cols <- intersect(names(cases_to_remove), names(qwt))
+
+sum(cases_to_remove$keep == "remove")
+
+#qwt: remove cases with keep == "remove" in cases_to_remove
+qwt <- qwt %>% 
+  left_join(cases_to_remove, by = common_cols) %>%
+  filter(is.na(keep) | keep == "keep") %>%
+  select(-c(overlap, group_overlap, keep, direkter_anschluss))
+
+```
+
+
+
 
 # Outcome Variablen Definition 
 
@@ -85,15 +189,11 @@ prop.table(table(qwt$ENTL301))
 
 ggplot(qwt, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
-#add Anzahl Tage in Behandlung
-qwt <- qwt %>% 
-    mutate(n_days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
-
 ```
 
 ```{r ENTL301_ndays_dist}
 
-ENTL_ndays <- ggplot(qwt %>% filter (ENTL301 != "Tod"), aes(x = ENTL301, y = n_days)) + 
+ENTL_ndays <- ggplot(qwt %>% filter (ENTL301 != "Tod"), aes(x = ENTL301, y = n.days)) + 
   geom_jitter(alpha=0.1, size = rel(0.8), ) +
   geom_boxplot(width = 0.2, outlier.shape = NA) +
   scale_y_continuous(breaks = seq(0, 100, by = 5)) +
@@ -111,10 +211,10 @@ ENTL_ndays
 graph2doc(x = ENTL_ndays, file=file.path(folder_plot, "ENTL_ndays.png"), width=7, height=5)
 ggsave(file.path(folder_plot, "ENTL_ndays.png"), ENTL_ndays, width = 10, height = 6)
 
-#calculate IQR for n_days only among regulär beendeten Behandlungen
+#calculate IQR for n.days only among regulär beendeten Behandlungen
 qwt %>% 
   filter(ENTL301 == "regulär") %>%
-  summarise(q25 = quantile(n_days, 0.25), q75 = quantile(n_days, 0.75), iqr = IQR(n_days), min = min(n_days), max = max(n_days))
+  summarise(q25 = quantile(n.days, 0.25), q75 = quantile(n.days, 0.75), iqr = IQR(n.days), min = min(n.days), max = max(n.days))
 
 ```
 
@@ -131,20 +231,20 @@ qwt <- qwt %>%
   filter(ENTL301 != "Tod") %>%
   mutate(treat_dur_cat = factor(case_when(
   #more than or 20 days in treatment
-  n_days >= 21 ~ 3,
+  n.days >= 21 ~ 3,
   #between 7 and 19 days (inclusive)
-  n_days >= 7 & n_days < 21 ~ 2,
+  n.days >= 7 & n.days < 21 ~ 2,
   #between 0 and 6 days (inclusive)
-  n_days >= 0 & n_days < 7 ~ 1,
+  n.days >= 0 & n.days < 7 ~ 1,
   TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
 
 # 2-stufige AV
 #qwt <- qwt %>%
 #  mutate(treat_dur_bin = factor(case_when(
   #more than or 20 days in treatment
-#  n_days >= 21 ~ 2,
+#  n.days >= 21 ~ 2,
   #below 20 days (inclusive)
-#  n_days < 21 ~ 1,
+#  n.days < 21 ~ 1,
 #  TRUE ~ NA_real_), levels = c(1, 2), labels = c("unter 21 Tage", "21+ Tage")))
 
 ```
@@ -153,7 +253,7 @@ qwt <- qwt %>%
 ```{r check_treat_dur}
 ggplot(qwt, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
-ggplot(qwt, aes(x = n_days)) +
+ggplot(qwt, aes(x = n.days)) +
   geom_histogram(binwidth = 1) +
   scale_x_continuous(limits = c(0, 30), breaks = seq(0, 30, by = 2), labels = seq(0, 30, by = 2)) 
 #  scale_x_continuous(limits = c(0, 27)) 
@@ -215,9 +315,9 @@ total_employ <- total_employ %>%
   rename(gkv = gkv.x)
 
 nrow(total_employ) - nrow(total_stamm) 
-#after the filter, there are 42 rows less than before
+#after filtering, there are 41 rows less than before
 missing_rows <- total_stamm %>%
-  anti_join(total_employ, by = c("pragmaid", "date.qwt.start", "date.qwt.end")) #für 42 Zeilen gibt es keine employment Daten (-> Lücken in den Daten, siehe unten), diese werden exkludiert (aktiver Versichertenstatus ist Inklusionskriterium)
+  anti_join(total_employ, by = c("pragmaid", "date.qwt.start", "date.qwt.end")) #für 41 Zeilen gibt es keine employment Daten (-> Lücken in den Daten, siehe unten), diese werden zT exkludiert (aktiver Versichertenstatus ist Inklusionskriterium)
 
 total_employ$emp.type <- as.factor(total_employ$emp.type)
 total_employ$sex <- as.factor(total_employ$sex)
@@ -242,14 +342,14 @@ cases_with_valid_ins <- check_missing %>% filter(date.qwt.start >= date.ins.star
 #add cases with valid insurance to inpat_employ
 total_employ <- bind_rows(total_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.qwt.start %in% cases_with_valid_ins$date.qwt.start & date.qwt.end %in% cases_with_valid_ins$date.qwt.end))
 
-table(total_employ$emp.type, useNA = "always") # 8 NAs, so the 8 cases without employment infos, but with insurance are added to the total_employ dataset
+table(total_employ$emp.type, useNA = "always") # 7 NAs, so the 7 cases without employment infos, but with insurance are added to the total_employ dataset
 ``` 
 ## Hinzufügen von Diagnose-Daten
 
 ```{r add_diagnoses}
 sum(is.na(all_diagnoses$pragmaid)) #158
 
-table(diagnoses_filtered$icd_type)
+table(all_diagnoses$icd_type)
 
 # keep only diagnoses of patients with icd_type confirmed, primary, secondary, any and that are not alcohol related
 diagnoses_filtered <- all_diagnoses %>% 
@@ -257,6 +357,7 @@ diagnoses_filtered <- all_diagnoses %>%
   filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
   filter(icd.alc == FALSE) %>% #keep only diagnoses that are not alcohol related (as all inpat cases are alcohol related)
   mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
+
 
 #check
 nrow(distinct(total_employ, pragmaid)) - nrow(distinct(diagnoses_filtered, pragmaid)) # 1 patient does not have any diagnoses that matches the criteria
@@ -436,15 +537,15 @@ sum(is.na(med_qwt$pragmaid)) #0
 nrow(distinct(fost_diagnoses_employ, pragmaid)) - nrow(distinct(med_qwt, pragmaid)) #45 patients do not have medication data, 1866 have
 
 #add med_qwt to fost_diagnoses_employ
-final_data_alltimes <- left_join(fost_diagnoses_employ, med_qwt, by = "pragmaid")
-nrow(distinct(med_fost_diagnoses_employ_alltimes, pragmaid)) #1911 patients -> okay
+med_fost_diagnoses_employ_alltimes <- left_join(fost_diagnoses_employ, med_qwt, by = "pragmaid")
+nrow(distinct(med_fost_diagnoses_employ_alltimes, pragmaid)) #1910 patients -> okay
 
 med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_alltimes %>%
 # only keep medication data that happend during the 3 months before the QWT
   filter(date.medi.disp >= (date.qwt.start - days(30)) & date.medi.disp <= date.qwt.start) %>%
   filter(ATC != "")
 
-nrow(distinct(med_fost_diagnoses_employ_fil, pragmaid, qwt_id)) # 1484 treatments have medication data in the timeframe of interest
+nrow(distinct(med_fost_diagnoses_employ_fil, pragmaid, qwt_id)) # 1475 treatments have medication data in the timeframe of interest
 
 #GKV X - GKV Y
 sum(med_fost_diagnoses_employ_fil$gkv.x != med_fost_diagnoses_employ_fil$gkv.y) #0 -> gkv.x and 
@@ -527,7 +628,7 @@ final_data$sex <- as.factor(final_data$sex)
 final_data$nationality <- as.factor(final_data$nationality)
 
 #check for missings
-summary(final_data) #8 NAs in EmpType -> set to "other"
+summary(final_data) #7 NAs in EmpType -> set to "other"
 final_data$gkv <- as.factor(final_data$gkv)
 final_data$emp.type[is.na(final_data$emp.type)] <- "other"
 
@@ -542,15 +643,15 @@ cutoff_qwtid
 final_data <- final_data %>% filter(qwt_id <= cutoff_qwtid)
 
 # ndays
-boxplot(final_data$n_days) # no outliers
-cutoff_ndays <- quantile(final_data$n_days, 0.75) + 3*IQR(final_data$n_days)
+boxplot(final_data$n.days) # no outliers
+cutoff_ndays <- quantile(final_data$n.days, 0.75) + 3*IQR(final_data$n.days)
 #how many cases are above the cutoff?
-sum(final_data$n_days > cutoff_ndays) # 0 cases 
+sum(final_data$n.days > cutoff_ndays) # 0 cases 
 
 #age
 boxplot(final_data$age) # some outliers
 cutoff_age <- quantile(final_data$age, 0.75) + 3*IQR(final_data$age)
-cutoff_age #103
+cutoff_age #107
 sum(final_data$age > cutoff_age) # 0 cases
 
 
@@ -618,7 +719,7 @@ add_model_summary(model2, "Model 2")
 
 
 model3 <- mblogit(formula = treat_dur_cat ~ sex + age, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model3) #Modell 3 hat die besten Anpassungswerte basierend auf Devianz, AIC und BIC. "age" scheint ein signifikanter Prädiktor für die Kategorien „7–20 Tage“ und „21+ Tage“ im Vergleich zu „1-6 Tage“ zu sein.
+getSummary.mblogit(model3) #Modell 3 hat die besten Anpassungswerte basierend auf Devianz und AIC. "age" scheint ein signifikanter Prädiktor für die Kategorien „7–20 Tage“ und „21+ Tage“ im Vergleich zu „1-6 Tage“ zu sein.
 add_model_summary(model3, "Model 3")
 
 model4 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id, random = ~ 1 | pragmaid, data = final_data)
@@ -626,7 +727,7 @@ getSummary.mblogit(model4) # Modell 4 hat die besten Anpassungswerte basierend a
 add_model_summary(model4, "Model 4")
 
 model5 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + nationality, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model5) # Modell 5 bietet keinen Vorteil gegenüber Modell 3 (außer leicht niedrigerer deviance), nationality wird nicht in das modell aufgenommen
+getSummary.mblogit(model5) # Modell 5 bietet keinen Vorteil gegenüber Modell 4 (außer leicht niedrigerer deviance), nationality wird nicht in das modell aufgenommen
 add_model_summary(model5, "Model 5")
 
 model6 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type, random = ~ 1 | pragmaid, data = final_data)
@@ -649,7 +750,7 @@ add_model_summary(model9, "Model 9") # char_sum verbessert den Modelfit und ist 
 
 model10 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + char_sum + fost.degree_bin, random = ~ 1 | pragmaid, data = final_data)
 getSummary.mblogit(model10)
-add_model_summary(model10, "Model 10") # keine Verbesserung durch hinzufügen von fost.degree_bin
+add_model_summary(model10, "Model 10") # keine Verbesserung durch hinzufügen von fost.degree_bin (außer in deviance)
 
 model11 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + char_sum + ndistinctATClevel2, random = ~ 1 | pragmaid, data = final_data)
 getSummary.mblogit(model11)
@@ -764,7 +865,7 @@ ggsave(file.path(folder_plot, "predicted_probs_char.png"), predict_and_plot("cha
 
 ## Signifikanz und Modellkoeffizienten
 
-- 1.39 (Intercept) ist geschätzt als log odds für eine Behandlungsdauer von 7-20 Tagen bei einer Frau, die 0 Jahre alt ist und ihre 0. QWT hat -> Log Odds positiv -> Behandlungen von 7-20 Tagen sind wahrscheinlicher als 1-6 Tage
+- 1.42 (Intercept) ist geschätzt als log odds für eine Behandlungsdauer von 7-20 Tagen bei einer Frau, die 0 Jahre alt ist und ihre 0. QWT hat -> Log Odds positiv -> Behandlungen von 7-20 Tagen sind wahrscheinlicher als 1-6 Tage
 
 - signifikant negativer Koeffizienten für Geschlecht:männlich -> Männer haben eine geringere Wahrscheinlichkeit für Behandlungen von 21+ Tagen als Frauen (7-20 Tage n.s.)
 
@@ -803,7 +904,7 @@ Der zufällige Intercept auf Gruppenebene (pragmaid) ist sehr gering, was darauf
 
 probabilities <- predict(model9, type = "response")
 #dataset with only continuous variables
-final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n_days, ndistinctATC, elix_sum, yob)))
+final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, elix_sum, yob)))
 
 predictors <- colnames(final_data_cont)
 
@@ -860,7 +961,7 @@ qwt <- qwt %>%
   TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
 
 prop.table(table(qwt$unpl_drop))
-ggplot(qwt, aes(x = unpl_drop, y = n_days)) + geom_violin() + geom_boxplot(width = 0.1) + theme(axis.text.x = element_text(angle = 35, hjust = 1))
+ggplot(qwt, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(width = 0.1) + theme(axis.text.x = element_text(angle = 35, hjust = 1))
 
 
 # Hinzufügen der OPS Codes
