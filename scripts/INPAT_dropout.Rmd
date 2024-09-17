@@ -6,22 +6,24 @@ output:
   html_document:
     code_folding: hide
 ---
+
 # To-Dos
 
-- ....
-
+-   ....
 
 Bei INPAT handelt es sich um stationäre, alkoholbezogene Kontakte (Haupt- oder Fachabteilungsdoiagnose Alkohol), die KEIN qualifizierter Entzug sind. OPS Codes: 9-60x; 9-61x; 9-62x
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 options(warn = -1)
 ```
+
 # Vorbereitungen
 
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet")
+packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "glmmTMB", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet", "ggeffects", "DHARMa", "effects")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -69,9 +71,11 @@ ls()
 list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
 rm(ldf)
 ```
+
 # Daten vorbereiten
 
 ## Check Zeiträume
+
 ```{r check_dates}
 
 ## DIREKTE ANSCHLÜSSE
@@ -81,7 +85,7 @@ inpat <- inpat %>%
   arrange(pragmaid, date.inpat.start) %>%
   group_by(pragmaid) %>%
   mutate(
-    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+    direkter_anschluss = (date.inpat.start == lag(date.inpat.end, default = NULL)) | (date.inpat.start == lag(date.inpat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
 
 table(inpat$direkter_anschluss, useNA = "always") #14 with direkter anschluss
 
@@ -171,10 +175,10 @@ inpat <- inpat %>%
 
 ```
 
-
-## Outcome Variablen Definition? 
+## Outcome Variablen Definition?
 
 ### ENTLASS301
+
 ```{r recode_ENTL}
 table(inpat$ENTL301)
 
@@ -183,91 +187,104 @@ inpat$ENTL301 <- factor(inpat$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 1
 "Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."))
 #was passiert nach interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG?
 
-#same for qwt
-table(qwt$ENTL301)
-qwt$ENTL301 <- factor(qwt$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 14, 15, 17, 22), labels = c("regulär", "beendet, nachstat. Beh. vorgesehen", "aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "Verlegung in ein anderes Krankenhaus", "Tod", "Rehaeinrichtung",
-"Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."))
+
+#Einteilung der ENTLASS Gründe in "regulär" vs "nicht regulär" (wenig sensitiv, aber spezifisch, dh wahrscheinlich werden viele Fälle verpasst, die ungeplant abgebrochen haben, aber dafür wenig falsch positive, dh hohe spezifität)
+inpat <- inpat %>% 
+  filter(ENTL301 != "Tod") %>%
+  mutate(unpl_drop = factor(case_when(
+  ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
+  ENTL301 %in% c("regulär", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung",
+                 "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
+  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
+
+prop.table(table(inpat$unpl_drop, useNA = "ifany"))
+ggplot(inpat, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(width = 0.1) + theme(axis.text.x = element_text(angle = 35, hjust = 1)) + ylim(NA, 75)
 
 ```
+
 ### Validierung der ENTLASS301 Variable an Behandlungsdauer
 
 ```{r check_ENTL301}
-prop.table(table(inpat$ENTL301))
-prop.table(table(qwt$ENTL301))
+#prop.table(table(inpat$ENTL301))
 
-ggplot(inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
+#ggplot(inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
 #add Anzahl Tage in Behandlung
-qwt <- qwt %>% 
-  mutate(n.days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
+#qwt <- qwt %>% 
+#  mutate(n.days = as.integer(difftime(as.Date(date.qwt.end), as.Date(date.qwt.start), units = "days")) + 1)
 
 
-summary(qwt$n.days)
-summary(inpat$n.days)
-IQR(qwt$n.days)
-IQR(inpat$n.days)
+#summary(qwt$n.days)
+#summary(inpat$n.days)
+#IQR(qwt$n.days)
+#IQR(inpat$n.days)
 #check outliers
-boxplot(qwt$n.days)
-boxplot(inpat$n.days) #sehr viele Ausreißer, Maximum 365 Tage
+#boxplot(qwt$n.days)
+#boxplot(inpat$n.days) #sehr viele Ausreißer, Maximum 365 Tage
 
 # bind datasets for plotting purposes
-inpat$dataset <- "inpat"
-qwt$dataset <- "qwt"
+#inpat$dataset <- "inpat"
+#qwt$dataset <- "qwt"
 
-qwt_inpat <- bind_rows(
-  inpat %>% select(ENTL301, n.days, dataset),
-  qwt %>% select(ENTL301, n.days, dataset)
-)
+#qwt_inpat <- bind_rows(
+#  inpat %>% select(ENTL301, n.days, dataset),
+#  qwt %>% select(ENTL301, n.days, dataset)
+#)
 
 
-ggplot(qwt_inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
+#ggplot(qwt_inpat, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
 #INPAT hat größeren Anteil "gegen ärztlichen Rat beendet" und "aus sonstigen Gründen beendet" verglichen mit QWT
 
-ggplot(qwt_inpat %>% filter(ENTL301 != "Tod"), aes(x = dataset, y = n.days)) +
-  geom_jitter(alpha=0.2, size = rel(0.8), height = 0.2) +
-  geom_violinhalf(width = 0.3, outlier.shape = NA) +
-  geom_boxplot(width = 0.05, outlier.shape = NA) +
-  scale_y_continuous(limits = c(0, 60), breaks = seq(0, 60, by = 5))
+#ggplot(qwt_inpat %>% filter(ENTL301 != "Tod"), aes(x = dataset, y = n.days)) +
+#  geom_jitter(alpha=0.2, size = rel(0.8), height = 0.2) +
+#  geom_violinhalf(width = 0.3, outlier.shape = NA) +
+#  geom_boxplot(width = 0.05, outlier.shape = NA) +
+#  scale_y_continuous(limits = c(0, 60), breaks = seq(0, 60, by = 5))
 
 
-ggplot(qwt_inpat %>% filter(ENTL301 != "Tod"), aes(x = ENTL301, y = n.days)) + 
-  geom_jitter(alpha = 0.1, size = rel(0.65)) +
-  geom_boxplot(width = 0.34, outlier.shape = NA, alpha = 0.7) +
-  facet_grid(dataset ~ .) +
-  scale_y_continuous(limits = c(0, 50), breaks = seq(0, 50, by = 10)) +
+#treatdur_ETNL_qwt_inpat <- ggplot(qwt_inpat %>% filter(ENTL301 != "Tod"), aes(x = ENTL301, y = n.days)) + 
+#  geom_jitter(alpha = 0.1, size = rel(0.65)) +
+#  geom_boxplot(width = 0.34, outlier.shape = NA, alpha = 0.7) +
+#  facet_grid(dataset ~ .) +
+#  scale_y_continuous(limits = c(0, 50), breaks = seq(0, 50, by = 10)) +
   #change y axis label
-  ylab("Anzahl Tage in QE") +
-  xlab("Entlassungsgrund (ENTL301)") +
+#  ylab("Anzahl Tage in QE") +
+#  xlab("Entlassungsgrund (ENTL301)") +
   #change legend title
-  labs(title = "Dauer eines Qualifizierten Entzugs nach Entlassungsgrund unter GKV Versicherten", caption = "Anmerk.: Datenpunkte markieren einzelne Behandlungen") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = rel(0.85)))
+#  labs(title = "Dauer einer Behandlung nach Entlassungsgrund und Treatment unter GKV Versicherten") +
+#  theme_minimal() +
+#  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = rel(0.85)))
+
+#save plot to doc
+#graph2doc(x = treatdur_ETNL_qwt_inpat, file=file.path(folder_plot, "treatdur_ETNL_qwt_inpat.png"), width=10, height=7)
 ```
-Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur wenige Tage dauern. Es gibt eine ähnliche, aber nicht ganz so stark ausgepärgte zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche und 21 Tage. Die ENTL301-Variable scheint daher (wieder) nicht ideal um einen Dropout bzw. einen erfolgreichen Behandlungsabschluss zu operationalisieren.
 
-Als alternative Operationalisierung der AV Behandlungserfolg des Aufenthalts ziehen wir daher stattdessen (wie mit den QWT Daten) die Anzahl der Tage in Behandlung heran. Die Behandlungsdauer teilen wir in drei Gruppen ein: 0-6 Tage, 7-20 Tage, und 21+ Tage. Dies entspricht einigermaßen der empirischen Verteilung, wobei die inhaltliche Bedeutung unklar ist. 
+Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur wenige Tage dauern. Es gibt eine ähnliche, aber nicht ganz so stark ausgepärgte zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche und 21 Tage. Die ENTL301-Variable wird trotz dieser Inkonsistenzen verwendet, um einen ungeplanten Dropout zu operationalisieren.
 
+Als alternative Operationalisierung der AV Behandlungserfolg des Aufenthalts stattdessen (wie mit den QWT Daten) die Anzahl der Tage in Behandlung heranzuziehen, macht hier nicht so viel Sinn, weil die Varianz sehr groß ist und es kaum extrerne Validierung gibt und die inhaltliche Bedeutung unklar ist. Dementsprechend müssen wir auf die ENTL301 zurückgreifen. 
 
 ### Behandlungsdauer als AV
+
 ```{r create vars}
-qwt_inpat <- qwt_inpat %>%
-  mutate(treat_dur_cat = factor(case_when(
-  #more than or 20 days in treatment
-  n.days >= 21 ~ 3,
-  #between 7 and 19 days (inclusive)
-  n.days >= 7 & n.days < 21 ~ 2,
-  #between 0 and 6 days (inclusive)
-  n.days >= 0 & n.days < 7 ~ 1,
-  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
+#qwt_inpat <- qwt_inpat %>%
+#  mutate(treat_dur_cat = factor(case_when(
+#  #more than or 21 days in treatment
+#  n.days >= 21 ~ 3,
+#  #between 7 and 20 days (inclusive)
+#  n.days >= 7 & n.days < 21 ~ 2,
+#  #between 0 and 6 days (inclusive)
+#  n.days >= 0 & n.days < 7 ~ 1,
+#  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
 
 #check distribution
-ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
+#ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
 
 ```
 
 # Prädiktoren
 
-## Validierung qwt_id
+## Validierung inpat_id
+
 ```{r check_qwt_id}
 # does the inpat_id increases with increasing date.inpat.start?
 inpat_check <- inpat %>% 
@@ -279,6 +296,7 @@ inpat_check <- inpat %>%
 #correct inpat_id, so that it is ordered by date.inpat.start
 inpat <- inpat %>% 
   group_by(pragmaid) %>%
+#  filter(ENTL301 != "Tod") %>% #exclude cases with ENTL301 == Tod)
   arrange(date.inpat.start) %>%
   mutate(inpat_id = row_number()) %>%
   mutate(treat_dur_cat = factor(case_when(
@@ -289,9 +307,11 @@ inpat <- inpat %>%
   #between 0 and 6 days (inclusive)
   n.days >= 0 & n.days < 7 ~ 1,
   TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
+
 ```
 
 ## Hinzufügen der Stammdaten - SEX + AGE + NATIONALITY
+
 ```{r add_stammdaten}
 #match pragma_id_GKV with inpat based on pragma_id to get sex and age information 
 total_stamm <- left_join(inpat, pragma_id_GKV, by="pragmaid")
@@ -312,6 +332,7 @@ summary(total_stamm$age) # 0 NAs
 ```
 
 ## Hinzufügen Emplyoment Status
+
 ```{r add_employment}
 nrow(distinct(total_stamm, pragmaid, inpat_id)) #3887 Fälle
 employ_unfiltered <- left_join(total_stamm, employment, by = "pragmaid")
@@ -337,6 +358,7 @@ employment %>% filter(pragmaid %in% missing_rows$pragmaid) %>% group_by(pragmaid
 ```
 
 ### Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
+
 ```{r check_missing_employment}
 #check if missing employment data is due to interruptions in insured periods
 check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
@@ -351,7 +373,8 @@ cases_with_valid_ins <- check_missing %>% filter(date.inpat.start >= date.ins.st
 inpat_employ <- bind_rows(inpat_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.inpat.start %in% cases_with_valid_ins$date.inpat.start))
 
 table(inpat_employ$emp.type, useNA = "always") # 8 NAs, so the 8 cases without employment infos, but with insurance are added to the inpat_employ dataset
-``` 
+```
+
 ## Hinzufügen von Diagnose-Daten
 
 ```{r add_diagnoses}
@@ -456,7 +479,8 @@ diagnoses_inpat_employ <- diagnoses_inpat_employ %>%
          char_sum = replace_na(char_sum, 0))
 ```
 
-### Diagnose Daten Descriptives 
+### Diagnose Daten Descriptives
+
 ```{r check_ndiagnoses}
 #plot histogram of number of diagnoses
 ggplot(diagnoses_inpat_employ, aes(x = elix_sum)) + geom_histogram(binwidth = 1)
@@ -464,7 +488,9 @@ summary(diagnoses_inpat_employ$elix_sum)
 ggplot(diagnoses_inpat_employ, aes(x = char_sum)) + geom_histogram(binwidth = 1)
 summary(diagnoses_inpat_employ$char_sum) 
 ```
+
 ## Hinzufügen von Pflegegraden
+
 ```{r add_pflegegrad}
 table(fosterage$fost.degree, useNA = "always")
 # sowohl Pflegegrade (PG) als auch Pflegestufen (PS). Pflegegrade sind ab 2017 gültig, Pflegestufen bis 2016. Wie Pflegestufen in Pflegegrade umrechnen?
@@ -569,12 +595,14 @@ hist(med_fost_diagnoses_inpat_employ$ndistinctATClevel2)
 ```
 
 # Auswahl relevanter Variablen
+
 ```{r select_vars}
 final_data <- med_fost_diagnoses_inpat_employ %>% 
-  select(-c(KH_FALL_ID, date.inpat.start, date.inpat.end, dataset, date.emp.start, date.emp.end, id_pragma_inpat, fost.degree, source, died, date.death, yob))
+  select(-c(KH_FALL_ID, date.inpat.start, date.inpat.end, date.emp.start, date.emp.end, id_pragma_inpat, fost.degree, source, died, date.death, yob))
 ```
 
 # Speicherplatz freigeben
+
 ```{r save_data}
 #alle Datenfiles die "all" oder "check" oder "missing" im Namen haben, können gelöscht werden
 #identifiziere alle Objekte, die gelöscht werden können
@@ -587,6 +615,7 @@ gc()
 ```
 
 # Überprüfung der Daten vor Modellierung
+
 ```{r check_data}
 
 final_data$emp.type <- as.factor(final_data$emp.type)
@@ -605,10 +634,10 @@ final_data$emp.type[is.na(final_data$emp.type)] <- "other"
 
 # inpat_id
 boxplot(final_data$inpat_id) # some patients did 30 treatments -> remove them?
-cutoff_inpatid <- quantile(final_data$inpat_id, 0.75) + 3*IQR(final_data$inpat_id)
-cutoff_inpatid
+#cutoff_inpatid <- quantile(final_data$inpat_id, 0.75) + 3*IQR(final_data$inpat_id)
+#cutoff_inpatid
 #remove them
-final_data <- final_data %>% filter(inpat_id <= cutoff_inpatid)
+#final_data <- final_data %>% filter(inpat_id <= cutoff_inpatid)
 
 # ndays
 boxplot(final_data$n.days)# many outliers
@@ -636,9 +665,8 @@ final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClev
 
 
 # check for multicollinearity
-#Just run “linear regression” after assuming categorical dependent variable as continuous variable
-final_data$treat_dur_cat_num <- as.numeric(final_data$treat_dur_cat)
-vif_model <- lm(treat_dur_cat_num ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2, data = final_data)
+
+vif_model <- glm(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat, family = "binomial", data = final_data)
 
 car::vif(vif_model) #no multicollinearity
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
@@ -648,7 +676,8 @@ car::vif(vif_model) #no multicollinearity
 
 ```
 
-#Multinomiale Modelle
+#Logistische Modelle
+
 ```{r multinom_models}
 # Initialisiere einen leeren DataFrame für die Modellanpassungsparameter
 model_summaries <- data.frame(
@@ -660,20 +689,239 @@ model_summaries <- data.frame(
 )
 
 add_model_summary <- function(model, model_name) {
-  summary <- getSummary.mblogit(model)
-  stats <- summary$sumstat
+#  summary <- summary(model)
+#  stats <- summary$sumstat
   model_summaries <<- rbind(model_summaries, data.frame(
     Model = model_name,
-    Deviance = stats["deviance"],
-    AIC = stats["AIC"],
-    BIC = stats["BIC"]
+    LogLik = logLik(model),
+    AIC = AIC(model),
+    BIC = BIC(model)
   ))
 }
 
 #nur Intercept und random effects
+model1 <- glmmTMB(unpl_drop ~ 1 + (1|pragmaid), family = "binomial", data = final_data)
+summary(model1)
+add_model_summary(model1, "Intercept")
+
+
+model2 <- glmmTMB(unpl_drop ~ sex + (1|pragmaid), family = "binomial", data = final_data) #model 2 führt zu Verbesserungen
+summary(model2)
+add_model_summary(model2, "Model 2")
+
+
+model3 <- glmmTMB(unpl_drop ~ sex + age + (1|pragmaid), family = "binomial", data = final_data)
+summary(model3)
+add_model_summary(model3, "Model 3")
+
+model4 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + (1|pragmaid), family = "binomial", data = final_data)
+summary(model4) # Modell 4 bietet keinen Vorteil gegenüber Modell 3 -> INPAT ID rauslassen?
+add_model_summary(model4, "Model 4")
+
+model5 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + (1|pragmaid), family = "binomial", data = final_data)
+summary(model5) # Modell 5 bietet keinen Vorteil gegenüber Modell 3 (außer leicht niedrigerer deviance)
+add_model_summary(model5, "Model 5")
+
+
+model6 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
+summary(model6) # Model 6 hat besseres AIC und deviance als Modell 3, aber schlechteres BIC
+add_model_summary(model6, "Model 6")
+
+model7 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + (1|pragmaid), family = "binomial", data = final_data)
+summary(model7)
+add_model_summary(model7, "Model 7")
+
+
+# ist char_sum ein besserer Prädiktor?
+model8 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + char_sum + (1|pragmaid), family = "binomial", data = final_data)
+summary(model8)
+add_model_summary(model8, "Model 8") # char_sum passt schlechter als elix_sum, ist aber auch signifikant
+
+model9 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
+summary(model9)
+add_model_summary(model9, "Model 9") # keine Verbesserung gegenüber Modell 8
+
+model10 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + (1|pragmaid), family = "binomial", data = final_data)
+summary(model10)
+add_model_summary(model10, "Model 10") 
+
+model11 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + (1|pragmaid), family = "binomial", data = final_data)
+summary(model11)
+add_model_summary(model11, "Model 11") 
+
+
+model12 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist aber knapp nicht signifikant
+summary(model12)
+add_model_summary(model12, "Model 12") 
+
+model13 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + inpat_id*sex + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist aber knapp nicht signifikant
+summary(model13)
+add_model_summary(model13, "Model 13") 
+
+d12 <- as.numeric(-2*logLik(model12)) #is the -2LL for mod0
+d13 <- as.numeric(-2*logLik(model13)) #is the -2LL for mod2
+ldif <- d12 - d13 #is the -2LL difference
+degfr <- 1 #difference in the number of parameters. degfr is 1 because mod13 has one extra parameter
+##compute the p-value.
+pchisq(ldif, degfr, lower.tail = FALSE) #.075
+#the -2LL of Model13 is not significantly closer to 0
+
+Anova(model12)
+Anova(model12,type="III") # to do: set sum-to-zero contrasts on factors and center numerical covariates
+
+model14 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + inpat_id*sex + inpat_id*elix_sum + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*elix*sum verbessert modelfit nicht
+summary(model14)
+add_model_summary(model14, "Model 14")
+
+
+model15 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + inpat_id*sex + sex*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion sex*age verbessert modelfit nicht
+summary(model15)
+add_model_summary(model15, "Model 15")
+
+
+#Interpretation: Bei einer geringen Anzahl von Behandlungen (niedrige inpat_id) nimmt die Wahrscheinlichkeit eines Abbruchs stärker mit dem Alter ab. Bei einer höheren Anzahl von Behandlungen ist der Einfluss des Alters weniger stark.
+
+#find the best fitting model
+choose_best_model <- function(summary_df, criterion) {
+  if (!criterion %in% names(summary_df)) {
+    stop("Ungültiges Kriterium. Wähle entweder 'LogLik', 'AIC' oder 'BIC'.")
+  }
+
+  if (criterion == "LogLik") {
+    best_model_row <- summary_df[which.max(summary_df[[criterion]]), ]
+  } else {
+    best_model_row <- summary_df[which.min(summary_df[[criterion]]), ]
+  }
+
+  return(best_model_row)
+}
+
+choose_best_model(model_summaries, "BIC") #Model 1 (Intercept) hat den besten fit
+choose_best_model(model_summaries, "AIC") #Model 8 hat den besten fit
+choose_best_model(model_summaries, "LogLik") #Model 11 hat den besten fit
+
+```
+
+# Predicted Probabilities
+
+```{r plot_pred_probs}
+# Predicted probabilities
+# Erstelle ein neues Datenset, durch das die interessierenden Variablen variiert werden
+
+coefffix_plot <- sjPlot::plot_model(model12, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+
+plot(ggpredict(model12, terms = c("age", "inpat_id")))
+
+
+#effekte der prädiktoren unter konstanthaltung aller anderen prädiktoren
+ae <- allEffects(model12)
+plot(ae)
+
+plot(ae["age:inpat_id"])
+plot(ae["sex"])
+plot(ae["elix_sum"])
+plot(ae["treat_dur_cat"])
+
+```
+
+# Unterschiede zu QWT Modellen:
+
+-   Wahrscheinlichkeit für 21+ Tage steigt mit steigendem Alter (QWT Modell: sinkt, 7-20 steigt bei beiden treatments)
+-   Männer haben eine höhere Wahrscheinlichkeit für längere Aufenthlate (QWT Modell: Frauen), ist aber n.s.
+-   Effekt von Komorbidität hat zwar die gleiche Richtung, aber ist deutlicher stärker für INPAT 21+ Tage (höhere Wahrscheinlichkeit für längere Aufenthalte)
+-   Effekt von IMPAT_ID ist in QWT Modell stärker, Richtung ist gleich (höhere ID, niedrigere Wahrscheinlichkeit für 21+ Tage Aufenthalte)
+
+# Gemeinsamkeiten zu QWT Modellen:
+
+-   Effekt Alter(positiv)
+-   Effekt von Komorbidität (positiv) - jedoch char bei QWT vs. elix bei INPAT
+-   Effekt von treatment_ID (negativ)
+-   Effekt von Beschäftigung (positiv) - beschäftigt = längere Aufenthalte
+
+# Interpretation der festen Effekte (Refernzgruppe 1-6 Tage)
+
+-   kein signifikanter Effekt von Geschlecht
+-   signifikant positiver Koeffizienten für Alter -\> mit steigendem Alter steigt die Wahrscheinlichkeit für Behandlungen von 7-20 Tagen und 21+ Tagen im Vergleich zu 1-6 Tagen
+-   signifikant negativer Koeffizient für inpat_ID -\> mit fortlaufenderID sinkt die Wahrscheinlichkeit für Behandlungen 21+ Tagen (7-20 Tage n.s.)
+-   signifikant negative Koeffizient für retired (Ref. employed) -\> Personen in Rente haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt, sowohl vergleichen mit 7-20 Tagen als auch vergleichen mit 21+ Tagen
+-   signifikant negative Koeffizient für unemployed (Ref. employed) -\> Unbeschäftigte haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt vergleichen mit 21+ Tagen (7-20 Tage n.s.)
+-   signifikant positiver Koeffizient für elix_sum -\> je höher der Elixhauser Score, desto höher die Wahrscheinlichkeit für einen längeren Aufenthalt (7-20 und 21+ Tage)
+
+# model checking and diagnostics
+
+```{r residuals}
+
+model_simres <- simulateResiduals(model12)
+plot(model_simres)
+```
+Keine signifikante Abweichung in der Verteilung der Residuen (p-Wert des KS-Tests > 0.05).
+Keine Anzeichen von Überdispersion (Dispersionstest nicht signifikant).
+Keine Ausreißer (Outlier-Test p = 1).
+Visuell zeigen die Residuen keine systematischen Muster.
+
+```{r check_linearity}
+
+# ASSUMPTIONS:
+#Linearity: Linear relationship between continuous variables and the logit transformation of the outcome variable. 
+
+probabilities <- predict(model8, type = "response")
+#dataset with only continuous variables
+final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, elix_sum)))
+
+predictors <- colnames(final_data_cont)
+
+
+# Logit für jede Kategorie berechnen 
+logits <- apply(probabilities, 2, function(p) log(p / (1 - p)))
+
+logits_df <- as.data.frame(logits) 
+combined_data <- cbind(final_data_cont, logits_df)
+
+final_data_long <- combined_data %>%
+  pivot_longer(
+    cols = all_of(names(logits_df)),  # Nutze die Spaltennamen deiner logits_df direkt
+    names_to = "category",
+    values_to = "logit"
+  ) %>%
+  pivot_longer(
+    cols = all_of(predictors),   # Stelle sicher, dass predictors existiert
+    names_to = "predictors",
+    values_to = "predictor.value"
+  )
+
+# Scatterplot
+ckeck_lin <- ggplot(final_data_long, aes(x = predictor.value, y = logit)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") +
+  theme_bw() +
+  facet_grid(category ~ predictors, scales = "free") +
+  labs(
+    title = "Beziehung zwischen Prädiktoren und Logits",
+    x = "Prädiktorwert",
+    y = "Logit"
+  ) +
+    theme(
+    strip.text = element_text(size = 6)  # Verkleinert die Textgröße für Facettenbeschriftungen
+  )
+
+ggsave("check_linearity.png", ckeck_lin, width = 20, height = 25, units = "cm")
+
+#looks mostly fine, but maybe some problems with elix_sum (plot for 7-20 days), looks rather cubic than linear
+```
+
+
+
+
+# OLD:
+```{r OLD}
+#nur Intercept und random effects
 model1 <- mblogit(formula = treat_dur_cat ~ 1, random = ~ 1 | pragmaid, data = final_data)
 getSummary.mblogit(model1)
 add_model_summary(model1, "Intercept")
+
+glmmTMB(unpl_drop ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = final_data, family = binomial)
+
+
 
 model2 <- mblogit(formula = treat_dur_cat ~ sex, random = ~ 1 | pragmaid, data = final_data) #model 2 führt zu keiner Verbesserungen (lediglich etwas geringere deviance)
 getSummary.mblogit(model2)
@@ -732,166 +980,5 @@ choose_best_model(model_summaries, "BIC") #Model 1 (Intercept) hat den besten fi
 choose_best_model(model_summaries, "AIC") #Model 8 hat den besten fit
 choose_best_model(model_summaries, "Deviance") #Model 11 hat den besten fit
 
-```
-# Predicted Probabilities 
+``` 
 
-```{r plot_pred_probs}
-# Predicted probabilities
-# Erstelle ein neues Datenset, durch das die Variablen, die dich interessieren, variiert werden
-
-
-#define function to generate new data that varies the variables of interest (age, inpat_id, elix_sum) and then plot the predicted probabilities with the variable of interest on x axis
-
-predict_and_plot <- function(variable_of_interest, model, data) {
-  # Werte für jede Variable von Interesse
-  age_values <- seq(from = min(data$age,na.rm=TRUE),to=max(data$age, na.rm = TRUE), length.out = 10)  # 10 Werte für Alter
-  inpat_id_values <- seq(from = min(data$inpat_id,na.rm=TRUE),to=max(data$inpat_id, na.rm = TRUE), length.out = 9)  # 4 Werte für inpat_id
-  elix_sum_values <- seq(from = min(data$elix_sum,na.rm=TRUE),to=max(data$elix_sum, na.rm = TRUE), length.out = 5)  # 4 Werte für elix_sum  # Neue Daten je nach Variable von Interesse erstellen
-  if (variable_of_interest == "age") {
-    new_data <- expand.grid(
-      age = age_values,
-      sex = unique(data$sex),
-      emp.type=unique(data$emp.type),
-      inpat_id = mean(data$inpat_id, na.rm=TRUE),
-      elix_sum=mean(data$elix_sum, na.rm = TRUE)
-    )
-    x_label <- "Alter"
-  } else if (variable_of_interest == "inpat_id") {
-    new_data <- expand.grid(
-      age = mean(data$age, na.rm=TRUE),
-      sex = unique(data$sex),
-      emp.type=unique(data$emp.type),
-      inpat_id = inpat_id_values,
-      elix_sum=mean(data$elix_sum, na.rm = TRUE)
-    )
-    x_label <- "inpat ID"
-  } else if (variable_of_interest == "elix_sum") {
-    new_data <- expand.grid(
-      age = mean(data$age, na.rm=TRUE),
-      sex = unique(data$sex),
-      emp.type=unique(data$emp.type),
-      inpat_id = mean(data$inpat_id, na.rm=TRUE),
-      elix_sum= elix_sum_values
-    )
-    x_label <- "Elixhauser Sumscore"
-  } else {
-    stop("Ununterstützte Variable der Interesse.")
-  }
-  
-  # Dummy-Level für pragmaid hinzufügen, falls notwendig
-  if ("pragmaid" %in% colnames(data)) {
-    new_data$pragmaid <- levels(data$pragmaid)[1] # Nutze ein existierendes Level als Dummy
-  }
-  
-  # Vorhersagen berechnen
-  predicted_probs <- predict(model, newdata = new_data, type = "response")
-  
-  # Kombiniere die Vorhersagen mit den Eingabewerten
-  predicted_data <- cbind(new_data, predicted_probs)
-  
-  # Reshape die Daten für ggplot
-  predicted_long <- pivot_longer(predicted_data, 
-                                 cols = c("1-6 Tage", "7-20 Tage", "21+ Tage"), 
-                                 names_to = "treat_dur_cat", 
-                                 values_to = "predicted_prob")
-  
-  #change the order of the levels of treat_dur_cat
-  predicted_long$treat_dur_cat <- factor(predicted_long$treat_dur_cat, levels = c("1-6 Tage", "7-20 Tage", "21+ Tage"))
-  
-  # Plotten der vorhergesagten Wahrscheinlichkeiten
-  ggplot(predicted_long, aes(x = .data[[variable_of_interest]], y = predicted_prob, color = sex)) +
-    geom_line() +
-    facet_grid(treat_dur_cat ~ emp.type, scales = "free") +
-    xlab(x_label) +
-    ylab("Vorhergesagte Wahrscheinlichkeit") +
-    theme_minimal() +
-    labs(color = "Geschlecht") +
-    theme(legend.position = "bottom")
-}
-
-
-predict_and_plot("inpat_id", model8, final_data)
-predict_and_plot("age", model8, final_data)
-predict_and_plot("elix_sum", model8, final_data)
-
-#save plots in folder_plot
-ggsave(file.path(folder_plot, "INPAT_predicted_probs_inpatid.png"), predict_and_plot("inpat_id", model8, final_data), width = 20, height = 25, units = "cm")
-ggsave(file.path(folder_plot, "INPAT_predicted_probs_age.png"), predict_and_plot("age", model8, final_data), width = 20, height = 25, units = "cm")
-ggsave(file.path(folder_plot, "INPAT_predicted_probs_elix.png"), predict_and_plot("elix_sum", model8, final_data), width = 20, height = 25, units = "cm")
-
-```
-# Unterschiede zu QWT Modellen:
-- Wahrscheinlichkeit für 21+ Tage steigt mit steigendem Alter (QWT Modell: sinkt, 7-20 steigt bei beiden treatments)
-- Männer haben eine höhere Wahrscheinlichkeit für längere Aufenthlate (QWT Modell: Frauen), ist aber n.s. 
-- Effekt von Komorbidität hat zwar die gleiche Richtung, aber ist deutlicher stärker für INPAT 21+ Tage (höhere Wahrscheinlichkeit für längere Aufenthalte)
-- Effekt von IMPAT_ID ist in QWT Modell stärker, Richtung ist gleich (höhere ID, niedrigere Wahrscheinlichkeit für 21+ Tage Aufenthalte)
-
-# Gemeinsamkeiten zu QWT Modellen:
-- Effekt Alter(positiv)
-- Effekt von Komorbidität (positiv) - jedoch char bei QWT vs. elix bei INPAT
-- Effekt von treatment_ID (negativ)
-- Effekt von Beschäftigung (positiv) - beschäftigt = längere Aufenthalte
-
-
-# Interpretation der festen Effekte (Refernzgruppe 1-6 Tage)
-
-- kein signifikanter Effekt von Geschlecht
-- signifikant positiver Koeffizienten für Alter -> mit steigendem Alter steigt die Wahrscheinlichkeit für Behandlungen von 7-20 Tagen und 21+ Tagen im Vergleich zu 1-6 Tagen
-- signifikant negativer Koeffizient für inpat_ID -> mit fortlaufender QWT_ID sinkt die Wahrscheinlichkeit für Behandlungen 21+ Tagen (7-20 Tage n.s.)
-- signifikant negative Koeffizient für retired (Ref. employed) -> Personen in Rente haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt, sowohl vergleichen mit 7-20 Tagen als auch vergleichen mit 21+ Tagen
-- signifikant negative Koeffizient für unemployed (Ref. employed) -> Unbeschäftigte haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt vergleichen mit 21+ Tagen (7-20 Tage n.s.)
-- signifikant positiver Koeffizient für elix_sum -> je höher der Elixhauser Score, desto höher die Wahrscheinlichkeit für einen längeren Aufenthalt (7-20 und 21+ Tage)
-
-
-
-
-# Check linearity assumption
-```{r check_linearity}
-
-# ASSUMPTIONS:
-#Linearity: Linear relationship between continuous variables and the logit transformation of the outcome variable. 
-
-probabilities <- predict(model8, type = "response")
-#dataset with only continuous variables
-final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, elix_sum)))
-
-predictors <- colnames(final_data_cont)
-
-
-# Logit für jede Kategorie berechnen 
-logits <- apply(probabilities, 2, function(p) log(p / (1 - p)))
-
-logits_df <- as.data.frame(logits) 
-combined_data <- cbind(final_data_cont, logits_df)
-
-final_data_long <- combined_data %>%
-  pivot_longer(
-    cols = all_of(names(logits_df)),  # Nutze die Spaltennamen deiner logits_df direkt
-    names_to = "category",
-    values_to = "logit"
-  ) %>%
-  pivot_longer(
-    cols = all_of(predictors),   # Stelle sicher, dass predictors existiert
-    names_to = "predictors",
-    values_to = "predictor.value"
-  )
-
-# Scatterplot
-ckeck_lin <- ggplot(final_data_long, aes(x = predictor.value, y = logit)) +
-  geom_point(size = 0.5, alpha = 0.5) +
-  geom_smooth(method = "loess") +
-  theme_bw() +
-  facet_grid(category ~ predictors, scales = "free") +
-  labs(
-    title = "Beziehung zwischen Prädiktoren und Logits",
-    x = "Prädiktorwert",
-    y = "Logit"
-  ) +
-    theme(
-    strip.text = element_text(size = 6)  # Verkleinert die Textgröße für Facettenbeschriftungen
-  )
-
-ggsave("check_linearity.png", ckeck_lin, width = 20, height = 25, units = "cm")
-
-#looks mostly fine, but maybe some problems with elix_sum (plot for 7-20 days), looks rather cubic than linear
-```
