@@ -11,7 +11,8 @@ output:
 - ....
 
 
-REHA kann sowohl in stationärer als auch in ambulanter Form durchgeführt werden, und sowohl über die GVK als auch DRV laufen. REHA dauert in der Regel mehrere Monate, kann aber auch bis zu einem Jahr dauern.
+REHA kann sowohl in stationärer als auch in ambulanter Form durchgeführt werden, und sowohl über die GVK als auch DRV laufen. REHA dauert in der Regel mehrere Monate, kann aber auch bis zu einem Jahr dauern. Die GKV Daten werden hier nicht berücksichtigt, weil die Mehrheit der Rehas von der DRV durchgeführt wird, und somit Inkonsistenzen zischen den Datensets umgangen werden können.
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 options(warn = -1)
@@ -61,7 +62,7 @@ filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 ldf <- lapply(filenames, readRDS)
 names(ldf) <- gsub(".rds", "", basename(filenames))
 print(names(ldf))
-names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "drvreha_specifics")
+names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "reha_new")
 names(ldf) <- names
 #check if all dataframes are loaded
 ls()
@@ -77,12 +78,41 @@ rm(ldf)
 str(reha)
 reha$n.days <- as.integer(difftime(as.Date(reha$date.reha.end), as.Date(reha$date.reha.start), units = "days")) + 1
 head(reha)
+reha_new$n.days <- as.integer(difftime(as.Date(reha_new$date.drvreha.end), as.Date(reha_new$date.drvreha.start), units = "days")) + 1
+head(reha)
 
 summary(reha$n.days)
+summary(reha_new$n.days)
 
-#distribution of reha.typ by source
-table(reha$reha.typ, reha$source) #gkv: ambulant & stationär, drv: ambulant & ganztägig ambulante Maßnahme & stationäre Maßnahme
+ggplot(reha_new, aes(x = MASSN_ART, fill = MASSN_ART)) +
+  geom_bar() +
+  facet_wrap(~DIAG_VERAEND, scales = "free_y") +
+  #rotate x axis labels
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
 
+
+reha_new <- reha_new %>% 
+  filter(ENTLASSFORM != "verstorben") %>%
+  mutate(unpl_drop = factor(case_when(
+  ENTLASSFORM %in% c("disziplinarisch", "vorzeitig mit ärztlichem Einverständnis/vorzeitig gegen ärztlichen Rat") ~ 1,
+  ENTLASSFORM %in% c("regulär", "Wechsel der Durchführungsart", "verlegt", "vorzeitig auf ärztliche Veranlassung") ~ 0,
+  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
+
+prop.table(table(reha_new$unpl_drop, useNA = "ifany"))
+
+ggplot(reha_new, aes(x = MASSN_ART, fill = unpl_drop)) +
+  geom_bar() +
+  facet_wrap(~DIAG_VERAEND, scales = "free_y") +
+  #rotate x axis labels
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#-------------------------------------
+###OLD
+#-------------------------------------
+#old: distribution of reha.typ by source
+table(reha_new$reha.typ, reha$source) #gkv: ambulant & stationär, drv: ambulant & ganztägig ambulante Maßnahme & stationäre Maßnahme
+
+#old
 ggplot(reha, aes(x = reha.typ, y = n.days)) +
   geom_jitter(alpha=0.2, size = rel(0.8), height = 0.2) +
 #  geom_violinhalf(width = 0.3, outlier.shape = NA) +
@@ -91,10 +121,57 @@ ggplot(reha, aes(x = reha.typ, y = n.days)) +
   #rotate x axis labels
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   scale_y_continuous(limits = c(0, 800), breaks = seq(0, 800, by = 30))
+###
+```
+# Prädiktoren 
+
+## Forlaufende Nummer pro Reha pro Person
+```{r check_id}
+reha_new <- reha_new %>% 
+  group_by(pragmaid) %>%
+  arrange(date.drvreha.start) %>%
+  mutate(reha_id = row_number())
+
+table(reha_new$reha_id)
+```
+## ALTER
+```{r age}
+reha_new <- reha_new %>%
+  mutate(age = as.integer(substr(date.drvreha.start, 1, 4)) - yob)
 
 ```
-Fazit: schwierig einheitliche Definition zu finden von "Behandlungserfolg" bzw. "Abbruch". Reha-Dauer variiert wahrscheinlich nicht nur durch Abbrüche (dh stellt nicht reines "Durchhalten" dar), sondern auch je nach Bedarf. Beispiel: ambulante Reha hat drei Peaks (1. etwa um 180 Tage, 2. etwa um 360 Zage, 3. etwa um 540 Tage). Jemand der 180 Tage schafft, könnte sowohl seine REHA vollständig absolviert haben, oder aber ein Behandlungsabbrecher sein, da er eigentlich einen Bedarf für eine 360 Tages Reha gehabt hätte.
+## Hinzufügen Emplyoment Status
 
+```{r add_employment}
+nrow(distinct(reha_new, pragmaid, reha_id)) #5293 Fälle
+employ_unfiltered <- left_join(reha_new, employment, by = "pragmaid")
+reha_new %>%
+  filter(pragmaid %in% employment$pragmaid) %>%
+  print()
+nrow(distinct(total_stamm, pragmaid, inpat_id)) # 3887 cases
+#FEHLER: pragmaIDs matchen nicht.
+```
+# Auswahl relevanter Variablen
+
+```{r select_vars}
+reha_final <- reha_new %>% 
+  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, nationality, DAUER_REHA, DIAG1, BEWILLDIAG, date.drvreha.start, date.drvreha.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob))
+```
+
+# Speicherplatz freigeben
+
+```{r save_data}
+#alle Datenfiles die "all" oder "check" oder "missing" im Namen haben, können gelöscht werden
+#identifiziere alle Objekte, die gelöscht werden können
+```
+
+
+
+
+
+## OLD!!:
+
+Fazit: schwierig einheitliche Definition zu finden von "Behandlungserfolg" bzw. "Abbruch". Reha-Dauer variiert wahrscheinlich nicht nur durch Abbrüche (dh stellt nicht reines "Durchhalten" dar), sondern auch je nach Bedarf. Beispiel: ambulante Reha hat drei Peaks (1. etwa um 180 Tage, 2. etwa um 360 Zage, 3. etwa um 540 Tage). Jemand der 180 Tage schafft, könnte sowohl seine REHA vollständig absolviert haben, oder aber ein Behandlungsabbrecher sein, da er eigentlich einen Bedarf für eine 360 Tages Reha gehabt hätte.
 Weiteres Vorgehen:
 Die DRV Daten enthalten die ENTL (Entlassform) und die Diagnose-Veränderungs Variablen. Ziehen wir diese zur Validierung hinzu. Dafür brauchen wir die HIV codes (in meinen DRV Daten gibt es keine PragmaID). 
 
