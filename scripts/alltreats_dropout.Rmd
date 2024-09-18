@@ -25,7 +25,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet")
+packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet", "ggeffects")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -257,16 +257,34 @@ cutoff_ndays_inpat
 sum(qwt_inpat$n.days[qwt_inpat$treatment == "inpat"] > cutoff_ndays_inpat) # 74 cases to remove
 qwt_inpat <- qwt_inpat %>% filter(!(treatment == "inpat" & n.days > cutoff_ndays_inpat))
 
+# Annahme INPAT entspricht einer Entgiftung (?), die wiederum normalerweise ziwschen 7 und 14 Tagen dauert (Problem: es gibt sehr lange INPATs, Verteilung außerdem ähnlich wie QWT)
+
 #create outcome variable
 qwt_inpat <- qwt_inpat %>%
   mutate(treat_dur_cat = factor(case_when(
-  #more than or 20 days in treatment
+  #more than or 21 days in treatment
   n.days >= 21 ~ 3,
-  #between 7 and 19 days (inclusive)
+  #between 7 and 20 days (inclusive)
   n.days >= 7 & n.days < 21 ~ 2,
   #between 0 and 6 days (inclusive)
   n.days >= 0 & n.days < 7 ~ 1,
   TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
+
+
+# ALTERNATIVE 1: 7 Tage cutoff for "kein Abbruch" in inpat
+#qwt_inpat <- qwt_inpat %>%
+#  mutate(treat_dur_cat = factor(case_when(
+#  #qwt: more than or 21 days in treatment -> kein Abbruch
+#  n.days >= 21 & treatment == "qwt" ~ 3,
+#  #qwt: more than or 7 days in treatment -> kein Abbruch
+#  n.days >= 7 & treatment == "inpat" ~ 3,
+#  #between 7 and 20 days (inclusive)
+#  n.days >= 7 & n.days < 21 & treatment == "qwt" ~ 2,
+#  n.days >= 4 & n.days < 7 & treatment == "inpat" ~ 2,
+#  #between 0 and 6 days (inclusive)
+#  n.days >= 0 & n.days < 7 & treatment == "qwt" ~ 1,
+#  n.days >= 0 & n.days < 4 & treatment == "inpat" ~ 1,
+#  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("früher Abbruch","später Abbruch", "kein Abbruch")))
 
 #check distribution
 ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~treatment)
@@ -718,9 +736,10 @@ model14 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + a
 getSummary.mblogit(model14) #Modell 14 hat die besten Anpassungswerte basierend auf Devianz, AIC und BIC. elix_sum ist signifikanter prädiktor für längere treatments
 add_model_summary(model14, "Model 14")
 
-model15 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + elix_sum + elix_sum*treatment, random = ~ 1 | pragmaid, data = final_data)
+model15 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + elix_sum + elix_sum*treatment, random = ~ 1 | pragmaid, data = final_data, method = "PQL")
 getSummary.mblogit(model15) #Modell 15 führt zu Verbesserung der Anpassungswerte -> elix_sum*treatment wird in das endgültige Modell aufgenommen
 add_model_summary(model15, "Model 15")
+
 
 #fitted der char_sum besser als elix_sum?
 model16 <- mblogit(formula = treat_dur_cat ~ treatment + sex + sex*treatment + age + id_across_treat + id_across_treat*treatment + nationality + emp.type + char_sum, random = ~ 1 | pragmaid, data = final_data)
@@ -756,7 +775,11 @@ choose_best_model(model_summaries, "BIC") #Model 8 (Intercept) hat den besten fi
 choose_best_model(model_summaries, "AIC") #Model 15 hat den besten fit
 choose_best_model(model_summaries, "Deviance") #Model 19 hat den besten fit
 
+coefffix_plot <- sjPlot::plot_model(model15, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE, title = "Fixed Effects: Predictors of Treatment Length (QWT and INPAT). Reference Group: 1-6 days.")
 
+ggsave(file.path(folder_plot, "coefffix_plot.png"), coefffix_plot, width = 30, height = 20, units = "cm", dpi = 300)
+
+graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot.png"), width=7, height=5)
 ```
 
 # Predicted Probabilities 
@@ -771,8 +794,8 @@ choose_best_model(model_summaries, "Deviance") #Model 19 hat den besten fit
 predict_and_plot <- function(variable_of_interest, model, data) {
   # Werte für jede Variable von Interesse
   age_values <- seq(from = min(data$age,na.rm=TRUE),to=max(data$age, na.rm = TRUE), length.out = 10)  # 10 Werte für Alter
-  id_across_treat_values <- seq(from = min(data$id_across_treat,na.rm=TRUE),to=max(data$id_across_treat, na.rm = TRUE), length.out = 9)  # 4 Werte für inpat_id
-  elix_sum_values <- seq(from = min(data$elix_sum,na.rm=TRUE),to=max(data$elix_sum, na.rm = TRUE), length.out = 5)  # 4 Werte für elix_sum  # Neue Daten je nach Variable von Interesse erstellen
+  id_across_treat_values <- seq(from = min(data$id_across_treat,na.rm=TRUE),to=max(data$id_across_treat, na.rm = TRUE), length.out = 9)  # 9 Werte für inpat_id
+  elix_sum_values <- seq(from = min(data$elix_sum,na.rm=TRUE),to=max(data$elix_sum, na.rm = TRUE), length.out = 5)  # 5 Werte für elix_sum
   if (variable_of_interest == "age") {
     new_data <- expand.grid(
       age = age_values,
@@ -780,6 +803,7 @@ predict_and_plot <- function(variable_of_interest, model, data) {
       nationality = unique(data$nationality),
       sex = unique(data$sex),
       emp.type=unique(data$emp.type),
+      pragmaid = unique(data$pragmaid),
       id_across_treat = mean(data$id_across_treat, na.rm=TRUE),
       elix_sum=mean(data$elix_sum, na.rm = TRUE)
     )
@@ -788,6 +812,7 @@ predict_and_plot <- function(variable_of_interest, model, data) {
     new_data <- expand.grid(
       age = mean(data$age, na.rm=TRUE),
       treatment = unique(data$treatment),
+      pragmaid = unique(data$pragmaid),
       nationality = unique(data$nationality),
       sex = unique(data$sex),
       emp.type=unique(data$emp.type),
@@ -799,6 +824,7 @@ predict_and_plot <- function(variable_of_interest, model, data) {
     new_data <- expand.grid(
       age = mean(data$age, na.rm=TRUE),
       treatment = unique(data$treatment),
+      pragmaid = unique(data$pragmaid),
       nationality = unique(data$nationality),
       sex = unique(data$sex),
       emp.type=unique(data$emp.type),
@@ -806,17 +832,30 @@ predict_and_plot <- function(variable_of_interest, model, data) {
       elix_sum= elix_sum_values
     )
     x_label <- "Elixhauser Sumscore"
+  } else if (variable_of_interest %in% colnames(data)) {
+    new_data <- expand.grid(
+      age = mean(data$age, na.rm=TRUE),
+      treatment = unique(data$treatment),
+      pragmaid = unique(data$pragmaid),
+      nationality = unique(data$nationality),
+      sex = unique(data$sex),
+      emp.type=unique(data$emp.type),
+      id_across_treat = mean(data$id_across_treat, na.rm=TRUE),
+      elix_sum=mean(data$elix_sum, na.rm = TRUE)
+    )
+    x_label <- variable_of_interest
   } else {
     stop("Ununterstützte Variable der Interesse.")
   }
   
   # Dummy-Level für pragmaid hinzufügen, falls notwendig
-  if ("pragmaid" %in% colnames(data)) {
-    new_data$pragmaid <- levels(data$pragmaid)[1] # Nutze ein existierendes Level als Dummy
-  }
-  
+#  if ("pragmaid" %in% colnames(data)) {
+#    new_data$pragmaid <- levels(data$pragmaid)[12] # Nutze ein existierendes Level als Dummy
+#  }
+  assign("new_data", new_data, envir = .GlobalEnv)
   # Vorhersagen berechnen
   predicted_probs <- predict(model, newdata = new_data, type = "response")
+  assign("predicted_probs", predicted_probs, envir = .GlobalEnv)
   
   # Kombiniere die Vorhersagen mit den Eingabewerten
   predicted_data <- cbind(new_data, predicted_probs)
@@ -829,11 +868,33 @@ predict_and_plot <- function(variable_of_interest, model, data) {
   
   #change the order of the levels of treat_dur_cat
   predicted_long$treat_dur_cat <- factor(predicted_long$treat_dur_cat, levels = c("1-6 Tage", "7-20 Tage", "21+ Tage"))
+  assign("predicted_long", predicted_long, envir = .GlobalEnv)
+  
+  # vorhergesagte Wahrscheinlichkeiten zusammenfassen entsprechend der variables of interest
+  
+  predicted_long_sum <- predicted_long %>%
+    group_by(treat_dur_cat, treatment, sex, .data[[variable_of_interest]]) %>%
+    summarize(predicted_prob = mean(predicted_prob))
+  assign("predicted_long_sum", predicted_long_sum, envir = .GlobalEnv)
+  
+  #geom depending on the variable of interest
+  if (variable_of_interest %in% c("age", "id_across_treat", "elix_sum")) {
+    geom <- geom_line()
+  } else {
+    geom <- geom_bar(stat = "identity", position = "dodge", aes(fill = .data[[variable_of_interest]]))
+  }
   
   # Plotten der vorhergesagten Wahrscheinlichkeiten
-  ggplot(predicted_long, aes(x = .data[[variable_of_interest]], y = predicted_prob, color = sex)) +
-    geom_line() +
-    facet_grid(treat_dur_cat ~ emp.type, scales = "free") +
+# Plotten der vorhergesagten Wahrscheinlichkeiten
+  ggplot(predicted_long_sum, aes(x = !!sym(variable_of_interest), y = predicted_prob, color = sex, fill = sex)) +
+    {
+      if (variable_of_interest %in% c("age", "id_across_treat", "elix_sum")) {
+        geom_line()
+      } else {
+        geom_bar(stat = "identity", position = "dodge")
+      }
+    } +
+    facet_grid(treat_dur_cat ~ treatment, scales = "free") +
     xlab(x_label) +
     ylab("Vorhergesagte Wahrscheinlichkeit") +
     theme_minimal() +
@@ -845,10 +906,27 @@ predict_and_plot <- function(variable_of_interest, model, data) {
 predict_and_plot("id_across_treat", model15, final_data)
 predict_and_plot("age", model15, final_data)
 predict_and_plot("elix_sum", model15, final_data)
+predict_and_plot("emp.type", model15, final_data)
+
+predicted_long_sum_sex <- predicted_long_sum %>% 
+  group_by(treat_dur_cat, treatment, sex) %>%
+  summarize(predicted_prob = mean(predicted_prob))
+
+alltreats_predicted_probs_sex <- ggplot(predicted_long_sum_sex, aes(x=sex, y=predicted_prob, fill = sex)) +
+         geom_bar(stat = "identity", position = "dodge", width = 0.6) +
+         facet_grid(treat_dur_cat ~ treatment, scales = "free") +
+         xlab("Geschlecht") +
+         ylab("Vorhergesagte Wahrscheinlichkeit") 
+
 
 #save plots in folder_plot
-ggsave(file.path(folder_plot, "INPAT_predicted_probs_inpatid.png"), predict_and_plot("inpat_id", model8, final_data), width = 20, height = 25, units = "cm")
-ggsave(file.path(folder_plot, "INPAT_predicted_probs_age.png"), predict_and_plot("age", model8, final_data), width = 20, height = 25, units = "cm")
-ggsave(file.path(folder_plot, "INPAT_predicted_probs_elix.png"), predict_and_plot("elix_sum", model8, final_data), width = 20, height = 25, units = "cm")
-
+ggsave(file.path(folder_plot, "alltreats_predicted_probs_id.png"), predict_and_plot("id_across_treat", model15, final_data), width = 20, height = 25, units = "cm")
+ggsave(file.path(folder_plot, "alltreats_predicted_probs_age.png"), predict_and_plot("age", model15, final_data), width = 20, height = 25, units = "cm")
+ggsave(file.path(folder_plot, "alltreats_predicted_probs_elix.png"), predict_and_plot("elix_sum", model15, final_data), width = 20, height = 25, units = "cm")
+ggsave(file.path(folder_plot, "alltreats_predicted_probs_sex.png"), alltreats_predicted_probs_sex, width = 20, height = 25, units = "cm")
+graph2doc(x = alltreats_predicted_probs_sex, file=file.path(folder_plot, "alltreats_predicted_probs_sex.png"), width=7, height=5)
+graph2doc(x = predict_and_plot("id_across_treat", model15, final_data), file=file.path(folder_plot, "alltreats_predicted_probs_id.png"), width=7, height=5)
+graph2doc(x = predict_and_plot("age", model15, final_data), file=file.path(folder_plot, "alltreats_predicted_probs_age.png"), width=7, height=5)
+graph2doc(x = predict_and_plot("elix_sum", model15, final_data), file=file.path(folder_plot, "alltreats_predicted_probs_elix.png"), width=7, height=5)
+graph2doc(x = predict_and_plot("emp.type", model15, final_data), file=file.path(folder_plot, "alltreats_predicted_probs_emp.png"), width=7, height=5)
 ```
