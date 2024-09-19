@@ -62,7 +62,7 @@ filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 ldf <- lapply(filenames, readRDS)
 names(ldf) <- gsub(".rds", "", basename(filenames))
 print(names(ldf))
-names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "reha_new")
+names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "drvreha")
 names(ldf) <- names
 #check if all dataframes are loaded
 ls()
@@ -71,36 +71,53 @@ rm(ldf)
 ```
 # Daten vorbereiten
 
+## Daten auf Fälle reduzieren, die sich auch in den GKV Daten finden
+
+```{r filtering}
+#ALLE reha perioden müssen GKV versichert gewesen sein!
+reha_filtered <- drvreha %>%
+  filter(date.drvreha.start >= as.Date("2015-12-01")) %>%
+  filter(pragmaid %in% insurance_periods$pragmaid) %>%
+  left_join(insurance_periods, by = c("pragmaid", "sex", "yob")) %>%
+  mutate(overlap = date.drvreha.start >= date.ins.start & date.drvreha.start <= date.ins.end) %>%
+  group_by(pragmaid, date.drvreha.start) %>%
+  summarise(has_overlap = any(overlap), .groups = 'drop') %>% 
+  group_by(pragmaid) %>%
+  filter(all(has_overlap)) %>%
+  ungroup() %>%
+  select(pragmaid)
+
+drvreha_gkvinsured <- drvreha %>%
+  filter(pragmaid %in% reha_filtered$pragmaid) %>%
+  filter(date.drvreha.start >= as.Date("2015-12-01"))
+```
+
 ## Outcome Variablen Definition? 
 
 ### Behandlungsdauer als AV
 ```{r rehaduration}
-str(reha)
-reha$n.days <- as.integer(difftime(as.Date(reha$date.reha.end), as.Date(reha$date.reha.start), units = "days")) + 1
-head(reha)
-reha_new$n.days <- as.integer(difftime(as.Date(reha_new$date.drvreha.end), as.Date(reha_new$date.drvreha.start), units = "days")) + 1
+drvreha_gkvinsured$n.days <- as.integer(difftime(as.Date(drvreha_gkvinsured$date.drvreha.end), as.Date(drvreha_gkvinsured$date.drvreha.start), units = "days")) + 1
 head(reha)
 
-summary(reha$n.days)
-summary(reha_new$n.days)
+summary(drvreha_gkvinsured$n.days)
 
-ggplot(reha_new, aes(x = MASSN_ART, fill = MASSN_ART)) +
+ggplot(drvreha_gkvinsured, aes(x = MASSN_ART, fill = ENTLASSFORM)) +
   geom_bar() +
   facet_wrap(~DIAG_VERAEND, scales = "free_y") +
   #rotate x axis labels
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
 
 
-reha_new <- reha_new %>% 
+drvreha_gkvinsured <- drvreha_gkvinsured %>% 
   filter(ENTLASSFORM != "verstorben") %>%
   mutate(unpl_drop = factor(case_when(
   ENTLASSFORM %in% c("disziplinarisch", "vorzeitig mit ärztlichem Einverständnis/vorzeitig gegen ärztlichen Rat") ~ 1,
   ENTLASSFORM %in% c("regulär", "Wechsel der Durchführungsart", "verlegt", "vorzeitig auf ärztliche Veranlassung") ~ 0,
   TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
 
-prop.table(table(reha_new$unpl_drop, useNA = "ifany"))
+prop.table(table(drvreha_gkvinsured$unpl_drop, useNA = "ifany"))
 
-ggplot(reha_new, aes(x = MASSN_ART, fill = unpl_drop)) +
+ggplot(drvreha_gkvinsured, aes(x = MASSN_ART, fill = unpl_drop)) +
   geom_bar() +
   facet_wrap(~DIAG_VERAEND, scales = "free_y") +
   #rotate x axis labels
@@ -110,52 +127,298 @@ ggplot(reha_new, aes(x = MASSN_ART, fill = unpl_drop)) +
 ###OLD
 #-------------------------------------
 #old: distribution of reha.typ by source
-table(reha_new$reha.typ, reha$source) #gkv: ambulant & stationär, drv: ambulant & ganztägig ambulante Maßnahme & stationäre Maßnahme
+#table(drvreha_gkvinsured$reha.typ, reha$source) #gkv: ambulant & stationär, drv: ambulant & ganztägig ambulante Maßnahme & stationäre Maßnahme
 
 #old
-ggplot(reha, aes(x = reha.typ, y = n.days)) +
-  geom_jitter(alpha=0.2, size = rel(0.8), height = 0.2) +
+#ggplot(reha, aes(x = reha.typ, y = n.days)) +
+#  geom_jitter(alpha=0.2, size = rel(0.8), height = 0.2) +
 #  geom_violinhalf(width = 0.3, outlier.shape = NA) +
-  geom_boxplot(width = 0.2, outlier.shape = NA) +
-  facet_wrap(~source) +
+#  geom_boxplot(width = 0.2, outlier.shape = NA) +
+#  facet_wrap(~source) +
   #rotate x axis labels
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(limits = c(0, 800), breaks = seq(0, 800, by = 30))
+#  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+#  scale_y_continuous(limits = c(0, 800), breaks = seq(0, 800, by = 30))
 ###
 ```
 # Prädiktoren 
 
 ## Forlaufende Nummer pro Reha pro Person
 ```{r check_id}
-reha_new <- reha_new %>% 
+drvreha_gkvinsured <- drvreha_gkvinsured %>% 
   group_by(pragmaid) %>%
   arrange(date.drvreha.start) %>%
   mutate(reha_id = row_number())
 
-table(reha_new$reha_id)
+table(drvreha_gkvinsured$reha_id)
 ```
 ## ALTER
 ```{r age}
-reha_new <- reha_new %>%
+drvreha_gkvinsured <- drvreha_gkvinsured %>%
   mutate(age = as.integer(substr(date.drvreha.start, 1, 4)) - yob)
 
 ```
 ## Hinzufügen Emplyoment Status
 
 ```{r add_employment}
-nrow(distinct(reha_new, pragmaid, reha_id)) #5293 Fälle
-employ_unfiltered <- left_join(reha_new, employment, by = "pragmaid")
-reha_new %>%
-  filter(pragmaid %in% employment$pragmaid) %>%
-  print()
-nrow(distinct(total_stamm, pragmaid, inpat_id)) # 3887 cases
-#FEHLER: pragmaIDs matchen nicht.
+employ_unfiltered <- left_join(drvreha_gkvinsured, employment, by = "pragmaid")
+
+reha_employ <- employ_unfiltered %>%
+  filter(date.drvreha.start >= date.emp.start & date.drvreha.start <= date.emp.end) #emp.type und EWERB_VANTRAG entsprechen sich nicht immer, daher wird der Konsistenz mit den anderen Datasets nur emp.type vernwendet
+
+missing_rows <- drvreha_gkvinsured %>%
+  anti_join(reha_employ, by = c("pragmaid", "reha_id")) 
+missing_rows$ERWERB_V_ANTR
+
+#two cases that are insured but have no valid employment data. add them again to dataset and set employment to "employed" according to ERWERB_V_ANTRAG
+
+reha_employ <- reha_employ %>% bind_rows(missing_rows)
+
+reha_employ <- reha_employ %>%
+  mutate(emp.type = ifelse(is.na(emp.type), "employed", emp.type))
 ```
+
+## Hinzufügen von Diagnose-Daten
+
+```{r add_diagnoses}
+# keep only diagnoses of patients in inpat_employ, with icd_type confirmed, primary, secondary, any and that are not alcohol related
+diagnoses_reha <- all_diagnoses %>% 
+  filter(pragmaid %in% reha_employ$pragmaid) %>% #keep only rows that are in inpat data 
+  filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
+  filter(icd.alc == FALSE) %>% #keep only diaignoses that are not alcohol related (as all inpat cases are alcohol related)
+  mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days")))
+
+#check
+nrow(distinct(reha_employ, pragmaid)) - nrow(distinct(diagnoses_reha, pragmaid)) # 1 patients do not have any diagnoses that matches the criteria
+
+# if date.diag.start is NA, set it to date.diag.end
+diagnoses_reha <- diagnoses_reha %>% 
+  mutate(date.diag.start = dplyr::if_else(is.na(date.diag.start), date.diag.end, date.diag.start))
+
+# join diagnoses with reha_employ
+diagnoses_reha_employ_alltimes <- left_join(reha_employ, diagnoses_reha, by = c("pragmaid")) 
+
+#check
+nrow(distinct(diagnoses_reha_employ_alltimes, pragmaid, reha_id)) #756 -> okay
+
+# keep only diagnoses in the timeframe of interest (maximum 2 quarters before inpat start)
+diagnoses_reha_employ_fil <- diagnoses_reha_employ_alltimes %>%
+  filter(
+    #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
+     date.diag.start >= (date.drvreha.start - days(180)) & date.diag.start <= date.drvreha.start)
+#Arbeitsdefinition, evtl für stationäre Diagnosen (bzw. alle anderen settings) Eingrenzung anpassen?
+
+diagnoses_reha_employ_fil %>% filter(gkv.x != gkv.y) #0 rows
+
+diagnoses_reha_employ_fil <- diagnoses_reha_employ_fil %>% 
+  select(-gkv.y) %>%
+  rename(gkv = gkv.x)
+
+nrow(distinct(diagnoses_reha_employ_fil, pragmaid, reha_id)) #728 (before 756 - 28 cases were excluded as they did not have a diagnosis in the timeframe of interest - they will be added in the end again
+
+# Charlson and Elixhauser Comorbidity Index
+
+diagnoses_reha_employ_fil$id_pragma_reha <- paste(diagnoses_reha_employ_fil$pragmaid, diagnoses_reha_employ_fil$reha_id, sep = "_")
+
+comorb_elix <- comorbidity::comorbidity(x=diagnoses_reha_employ_fil, id = "id_pragma_reha",
+                                code = "icd",map="elixhauser_icd10_quan",
+                                assign0 = T, tidy.codes = T)
+print(head(comorb_elix))  
+comorb_char <- comorbidity::comorbidity(x=diagnoses_reha_employ_fil, id = "id_pragma_reha",
+                                code = "icd",map="charlson_icd10_quan",
+                                assign0 = T,tidy.codes = T)
+print(head(comorb_char))  
+
+comorb_elix_sum <- comorb_elix %>%
+  #new column with row sums using all columns except id_pragma_reha
+  mutate(elix_sum = rowSums(select(., -id_pragma_reha))) %>%
+  select(id_pragma_reha, elix_sum)
+
+comorb_char_sum <- comorb_char %>%
+  #new column with row sums using all columns except id_pragma_reha
+  mutate(char_sum = rowSums(select(., -id_pragma_reha))) %>%
+  select(id_pragma_reha, char_sum)
+
+#bind both comorbidity dataframes
+comorb_sum <- left_join(comorb_elix_sum, comorb_char_sum, by = "id_pragma_reha")
+print(head(comorb_sum))      
+
+nrow(distinct(reha_employ, pragmaid, reha_id)) - nrow(distinct(comorb_sum, id_pragma_reha)) #28 cases, these have to be added to the comorb_sum dataset 
+
+reha_employ$id_pragma_reha <- paste(reha_employ$pragmaid, reha_employ$reha_id, sep = "_")
+
+diagnoses_reha_employ <- left_join(reha_employ, comorb_sum, by = "id_pragma_reha")
+
+#are there missings? 
+nrow(reha_employ) - nrow(diagnoses_reha_employ) #0
+sum(is.na(diagnoses_reha_employ$elix_sum)) #28 missings
+sum(is.na(diagnoses_reha_employ$char_sum)) #28 missings
+
+#set NAs to 0
+diagnoses_reha_employ <- diagnoses_reha_employ %>% 
+  mutate(elix_sum = replace_na(elix_sum, 0),
+         char_sum = replace_na(char_sum, 0))
+```
+
+## Hinzufügen von Pflegegraden
+
+```{r add_pflegegrad}
+table(fosterage$fost.degree, useNA = "always")
+# sowohl Pflegegrade (PG) als auch Pflegestufen (PS). Pflegegrade sind ab 2017 gültig, Pflegestufen bis 2016. Wie Pflegestufen in Pflegegrade umrechnen?
+
+fost_reha <- fosterage %>% 
+  filter(pragmaid %in% diagnoses_reha_employ$pragmaid)
+
+nrow(distinct(diagnoses_reha_employ, pragmaid)) - nrow(distinct(fost_reha, pragmaid)) #520 patients do not have fosterage data, 30 have
+
+fost_diagnoses_reha_employ_alltimes <- left_join(diagnoses_reha_employ, fost_reha, by = "pragmaid")
+
+
+fost_diagnoses_reha_employ_fil <- fost_diagnoses_reha_employ_alltimes %>%
+  filter((date.drvreha.start >= date.fost.start & is.na(date.fost.end)) | (date.drvreha.start >= date.fost.start & date.drvreha.start <= date.fost.end))
+
+nrow(distinct(fost_diagnoses_reha_employ_fil, pragmaid)) # 6 patients do have a pflegegrad/stufe during the beginning of the reha treatment - as this is not much fosterage will be ignored. 
+
+```
+## Hinzufügen von Medikation
+
+```{r add_medication}
+med_reha <- medications %>% 
+  filter(pragmaid %in% diagnoses_reha_employ$pragmaid)
+
+nrow(distinct(diagnoses_reha_employ, pragmaid)) - nrow(distinct(med_reha, pragmaid)) #8 patients do not have medication data, 542 have
+
+med_diagnoses_reha_employ_alltimes <- left_join(diagnoses_reha_employ, med_reha, by = "pragmaid")
+nrow(distinct(med_diagnoses_reha_employ_alltimes, pragmaid)) # 550-> okay
+
+med_diagnoses_reha_employ_fil <- med_diagnoses_reha_employ_alltimes %>%
+  # only keep medication data that happend during the 3 months before the rehaient treatment
+  filter(date.medi.disp >= (date.drvreha.start - days(30)) & date.medi.disp <= date.drvreha.start) %>%
+  filter(ATC != "")
+
+nrow(distinct(med_diagnoses_reha_employ_fil, id_pragma_reha)) # 285 reha treatments have medication data in the timeframe of interest
+
+#GKV X - GKV Y
+sum(med_diagnoses_reha_employ_fil$gkv.x != med_diagnoses_reha_employ_fil$gkv.y) # 0 cases
+
+med_diagnoses_reha_employ_fil <- med_diagnoses_reha_employ_fil %>% 
+  select(-c(gkv.y, REZ_ID, LANR_FAGS, date.medi.presc, PZN_ANZ, DDD1000_PK)) %>%
+  rename(gkv = gkv.x) %>%
+  ungroup()
+
+#new variable with level 2 ATCs (therapeutische Untergruppe)
+med_diagnoses_reha_employ_fil <- med_diagnoses_reha_employ_fil %>% 
+  group_by(id_pragma_reha) %>%
+  mutate(Level2_ATC = substr(ATC, 1, 3)) %>%
+  ungroup()
+
+#how many different values of Level2_ATC are there? 
+unique_level2_ATCs <- unique(med_diagnoses_reha_employ_fil$Level2_ATC)
+length(unique_level2_ATCs) #54
+
+# welche Untergruppe ist am häufigsten vertreten?
+sorted_atc_counts <- med_diagnoses_reha_employ_fil %>%
+  count(Level2_ATC, sort = TRUE) #Psychoanaleptika (N06) kommt am häufigsten vor; vorwiegend anregender Wirkung (Unterschied zu Psycholeptika)
+
+#calculate sum of distinct full ATC and level 2 ATC codes
+med_diagnoses_reha_employ_fil <- med_diagnoses_reha_employ_fil %>%
+  group_by(id_pragma_reha) %>%
+  dplyr::summarize(ndistinctATClevel2 = n_distinct(Level2_ATC), 
+            ndistinctATC = n_distinct(ATC)) %>%
+  ungroup()
+
+table(med_diagnoses_reha_employ_fil$ndistinctATClevel2)
+
+med_diagnoses_reha_employ <- left_join(diagnoses_reha_employ, med_diagnoses_reha_employ_fil, by = "id_pragma_reha")
+
+med_diagnoses_reha_employ <- med_diagnoses_reha_employ %>%
+  mutate(ndistinctATC = ifelse(is.na(ndistinctATC), 0, ndistinctATC)) %>%
+  mutate(ndistinctATClevel2 = ifelse(is.na(ndistinctATClevel2), 0, ndistinctATClevel2)) %>%
+  mutate(polymedi = as.factor(ifelse(ndistinctATC >= 6, "ja", "nein"))) %>%
+  mutate(polymedi_level2 = as.factor(ifelse(ndistinctATClevel2 >= 5, "ja", "nein")))
+
+summary(med_diagnoses_reha_employ$ndistinctATClevel2)
+hist(med_diagnoses_reha_employ$ndistinctATClevel2)
+
+```
+## Hinzufügen von QWT ID (wie viele QWTs hat eine Person zum Zeitpunkt der REHA bereits gemacht?)
+
+```{r qwt count}
+
+#Daten zusammenführen
+
+med_diagnoses_reha_employ$treatment <- "reha"
+qwt$treatment <- "qwt"
+
+#rename 
+qwt <- qwt %>% rename(date.treat.start = date.qwt.start, date.treat.end = date.qwt.end)
+med_diagnoses_reha_employ <- med_diagnoses_reha_employ %>% rename(date.treat.start = date.drvreha.start, date.treat.end = date.drvreha.end)
+
+colnames <- c("date.treat.start", "date.treat.end", "treatment", "pragmaid")
+
+#are colnames in qwt and reha? 
+all(colnames %in% colnames(qwt))
+
+med_diagnoses_reha_employ_qwt <- bind_rows(
+  med_diagnoses_reha_employ, qwt %>% select(all_of(colnames)))
+
+med_diagnoses_reha_employ_qwt <- med_diagnoses_reha_employ_qwt %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(QWT_count_before_reha = sapply(1:n(), function(i) {
+    if (treatment[i] == "reha") {
+      sum(treatment[1:(i-1)] == "qwt" & date.treat.end[1:(i-1)] < date.treat.start[i])
+    } else {
+      NA
+    }
+  }))
+
+#check
+med_diagnoses_reha_employ_qwt %>% select(pragmaid, date.treat.start, reha_id, treatment, QWT_count_before_reha) %>% arrange(pragmaid, date.treat.start) #okay
+
+med_diagnoses_reha_employ_qwt <- med_diagnoses_reha_employ_qwt %>% filter(treatment == "reha")
+
+```
+
+## Hinzufügen von INPAT ID (wie viele Rehas hat eine Person zum Zeitpunkt des reha treatments bereits gemacht?)
+
+```{r reha count}
+
+#Daten zusammenführen (reha und nicht reha_new Daten, da in den reha daten sowohl GKV als auch DRV vorhanden sind)
+inpat$treatment <- "inpat"
+
+#rename 
+inpat <- inpat %>% rename(date.treat.start = date.inpat.start, date.treat.end = date.inpat.end)
+
+#are colnames in qwt and reha? 
+all(colnames %in% colnames(inpat))
+
+med_diagnoses_reha_employ_qwt_inpat <- bind_rows(
+  med_diagnoses_reha_employ_qwt, inpat %>% select(all_of(colnames)))
+
+med_diagnoses_reha_employ_qwt_inpat <- med_diagnoses_reha_employ_qwt_inpat %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(INPAT_count_before_reha = sapply(1:n(), function(i) {
+    if (treatment[i] == "reha") {
+      sum(treatment[1:(i-1)] == "inpat" & date.treat.end[1:(i-1)] < date.treat.start[i])
+    } else {
+      NA
+    }
+  }))
+
+#check
+med_diagnoses_reha_employ_qwt_inpat %>% select(pragmaid, date.treat.start, reha_id, treatment, QWT_count_before_reha, INPAT_count_before_reha) %>% arrange(pragmaid, date.treat.start) #okay
+
+med_diagnoses_reha_employ_qwt_inpat <- med_diagnoses_reha_employ_qwt_inpat %>% filter(treatment == "reha")
+
+```
+
+
 # Auswahl relevanter Variablen
 
 ```{r select_vars}
-reha_final <- reha_new %>% 
-  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, nationality, DAUER_REHA, DIAG1, BEWILLDIAG, date.drvreha.start, date.drvreha.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob))
+reha_final <- med_diagnoses_reha_employ_qwt_inpat  %>% 
+  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, nationality, DAUER_REHA, DIAG1, BEWILLDIAG, date.treat.start, date.treat.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob))
 ```
 
 # Speicherplatz freigeben
