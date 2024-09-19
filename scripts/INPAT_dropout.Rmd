@@ -8,7 +8,7 @@ output:
 ---
 
 # To-Dos
-
+- Outlier Removal?
 -   ....
 
 Bei INPAT handelt es sich um stationäre, alkoholbezogene Kontakte (Haupt- oder Fachabteilungsdoiagnose Alkohol), die KEIN qualifizierter Entzug sind. OPS Codes: 9-60x; 9-61x; 9-62x
@@ -64,7 +64,7 @@ filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 ldf <- lapply(filenames, readRDS)
 names(ldf) <- gsub(".rds", "", basename(filenames))
 print(names(ldf))
-names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha")
+names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "reha_new")
 names(ldf) <- names
 #check if all dataframes are loaded
 ls()
@@ -336,7 +336,6 @@ summary(total_stamm$age) # 0 NAs
 ```{r add_employment}
 nrow(distinct(total_stamm, pragmaid, inpat_id)) #3887 Fälle
 employ_unfiltered <- left_join(total_stamm, employment, by = "pragmaid")
-nrow(distinct(total_stamm, pragmaid, inpat_id)) # 3887 cases
 
 table(employ_unfiltered$gkv.x, useNA = "always")
 table(employ_unfiltered$gkv.y, useNA = "always") #same
@@ -593,12 +592,84 @@ summary(med_fost_diagnoses_inpat_employ$ndistinctATClevel2)
 hist(med_fost_diagnoses_inpat_employ$ndistinctATClevel2)
 
 ```
+## Hinzufügen von QWT ID (wie viele QWTs hat eine Person zum Zeitpunkt des INPAT treatments bereits gemacht?)
+
+```{r qwt count}
+
+#Daten zusammenführen
+
+med_fost_diagnoses_inpat_employ$treatment <- "inpat"
+qwt$treatment <- "qwt"
+
+#rename 
+qwt <- qwt %>% rename(date.treat.start = date.qwt.start, date.treat.end = date.qwt.end)
+med_fost_diagnoses_inpat_employ <- med_fost_diagnoses_inpat_employ %>% rename(date.treat.start = date.inpat.start, date.treat.end = date.inpat.end)
+
+colnames <- c("date.treat.start", "date.treat.end", "treatment", "pragmaid")
+
+#are colnames in qwt and inpat? 
+all(colnames %in% colnames(qwt))
+
+med_fost_diagnoses_inpat_employ_qwt <- bind_rows(
+  med_fost_diagnoses_inpat_employ, qwt %>% select(all_of(colnames)))
+
+med_fost_diagnoses_inpat_employ_qwt <- med_fost_diagnoses_inpat_employ_qwt %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(QWT_count_before_INPAT = sapply(1:n(), function(i) {
+    if (treatment[i] == "inpat") {
+      sum(treatment[1:(i-1)] == "qwt" & date.treat.end[1:(i-1)] < date.treat.start[i])
+    } else {
+      NA
+    }
+  }))
+
+#check
+med_fost_diagnoses_inpat_employ_qwt %>% select(pragmaid, date.treat.start, inpat_id, treatment, QWT_count_before_INPAT) %>% arrange(pragmaid, date.treat.start) #okay
+
+med_fost_diagnoses_inpat_employ_qwt <- med_fost_diagnoses_inpat_employ_qwt %>% filter(treatment == "inpat")
+
+```
+
+## Hinzufügen von REHA ID (wie viele Rehas hat eine Person zum Zeitpunkt des INPAT treatments bereits gemacht?)
+
+```{r reha count}
+
+#Daten zusammenführen (reha und nicht reha_new Daten, da in den reha daten sowohl GKV als auch DRV vorhanden sind)
+reha$treatment <- "reha"
+
+#rename 
+reha <- reha %>% rename(date.treat.start = date.reha.start, date.treat.end = date.reha.end)
+
+#are colnames in qwt and inpat? 
+all(colnames %in% colnames(reha))
+
+med_fost_diagnoses_inpat_employ_qwt_reha <- bind_rows(
+  med_fost_diagnoses_inpat_employ_qwt, reha %>% select(all_of(colnames)))
+
+med_fost_diagnoses_inpat_employ_qwt_reha <- med_fost_diagnoses_inpat_employ_qwt_reha %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(REHA_count_before_INPAT = sapply(1:n(), function(i) {
+    if (treatment[i] == "inpat") {
+      sum(treatment[1:(i-1)] == "reha" & date.treat.end[1:(i-1)] < date.treat.start[i])
+    } else {
+      NA
+    }
+  }))
+
+#check
+med_fost_diagnoses_inpat_employ_qwt_reha %>% select(pragmaid, date.treat.start, inpat_id, treatment, QWT_count_before_INPAT, REHA_count_before_INPAT) %>% arrange(pragmaid, date.treat.start) #okay
+
+med_fost_diagnoses_inpat_employ_qwt_reha <- med_fost_diagnoses_inpat_employ_qwt_reha %>% filter(treatment == "inpat")
+
+```
 
 # Auswahl relevanter Variablen
 
 ```{r select_vars}
-final_data <- med_fost_diagnoses_inpat_employ %>% 
-  select(-c(KH_FALL_ID, date.inpat.start, date.inpat.end, date.emp.start, date.emp.end, id_pragma_inpat, fost.degree, source, died, date.death, yob))
+final_data <- med_fost_diagnoses_inpat_employ_qwt_reha %>% 
+  select(-c(KH_FALL_ID, date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_inpat, fost.degree, source, died, date.death, yob, treatment))
 ```
 
 # Speicherplatz freigeben
@@ -642,7 +713,7 @@ boxplot(final_data$inpat_id) # some patients did 30 treatments -> remove them?
 # ndays
 boxplot(final_data$n.days)# many outliers
 cutoff <- quantile(final_data$n.days, 0.75) + 3*IQR(final_data$n.days)
-final_data <- final_data %>% filter(n.days <= cutoff)
+#final_data <- final_data %>% filter(n.days <= cutoff)
 
 # char_sum
 boxplot(final_data$char_sum) # some outliers
@@ -662,11 +733,16 @@ cutoff_ndistinctATClevel2 <- quantile(final_data$ndistinctATClevel2, 0.75) + 3*I
 cutoff_ndistinctATClevel2
 final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
 
+#QWT_count_before_INPAT
+boxplot(final_data$QWT_count_before_INPAT)
+cutoff_QWT_count_before_INPAT <- quantile(final_data$QWT_count_before_INPAT, 0.75) + 3*IQR(final_data$QWT_count_before_INPAT)
+cutoff_QWT_count_before_INPAT
+
 
 
 # check for multicollinearity
 
-vif_model <- glm(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat, family = "binomial", data = final_data)
+vif_model <- glm(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT, family = "binomial", data = final_data)
 
 car::vif(vif_model) #no multicollinearity
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
@@ -750,33 +826,41 @@ summary(model11)
 add_model_summary(model11, "Model 11") 
 
 
-model12 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist aber knapp nicht signifikant
+model12 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + (1|pragmaid), family = "binomial", data = final_data)
 summary(model12)
 add_model_summary(model12, "Model 12") 
 
-model13 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + inpat_id*sex + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist aber knapp nicht signifikant
+model13 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von REHA_count_before_INPAT ist nicht signifikant und verschlechtert model fit (auch wenn Reihenfolge umgekehr, dh wenn erst REHA count und dann QWT count aufgenommen wird)
 summary(model13)
 add_model_summary(model13, "Model 13") 
 
-d12 <- as.numeric(-2*logLik(model12)) #is the -2LL for mod0
-d13 <- as.numeric(-2*logLik(model13)) #is the -2LL for mod2
-ldif <- d12 - d13 #is the -2LL difference
-degfr <- 1 #difference in the number of parameters. degfr is 1 because mod13 has one extra parameter
+model14 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist signifikant
+summary(model14)
+add_model_summary(model14, "Model 14") 
+
+model15 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*sex + (1|pragmaid), family = "binomial", data = final_data)  #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist aber knapp nicht signifikant
+summary(model15)
+add_model_summary(model15, "Model 15") 
+#Ist Modelverbesserung signifikant durch Hinzunahme von inpat_id*sex?
+d14 <- as.numeric(-2*logLik(model14)) #is the -2LL for mod0
+d15 <- as.numeric(-2*logLik(model15)) #is the -2LL for mod2
+ldif <- d14 - d15 #is the -2LL difference
+degfr <- 1 #difference in the number of parameters. degfr is 1 because mod15 has one extra parameter
 ##compute the p-value.
-pchisq(ldif, degfr, lower.tail = FALSE) #.075
-#the -2LL of Model13 is not significantly closer to 0
+pchisq(ldif, degfr, lower.tail = FALSE) #.13
+#the -2LL of Model15 is not significantly closer to 0
 
 Anova(model12)
 Anova(model12,type="III") # to do: set sum-to-zero contrasts on factors and center numerical covariates
 
-model14 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + inpat_id*sex + inpat_id*elix_sum + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*elix*sum verbessert modelfit nicht
-summary(model14)
-add_model_summary(model14, "Model 14")
+model16 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*elix_sum + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist signifikant
+summary(model16) #Hinzunahme von Interaktion inpat_id*elix*sum verbessert modelfit nicht
+add_model_summary(model16, "Model 16") 
 
 
-model15 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + inpat_id*age + inpat_id*sex + sex*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion sex*age verbessert modelfit nicht
-summary(model15)
-add_model_summary(model15, "Model 15")
+model17 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + sex*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist signifikant
+summary(model17) #Hinzunahme von Interaktion sex*age verbessert modelfit nicht
+add_model_summary(model17, "Model 17") 
 
 
 #Interpretation: Bei einer geringen Anzahl von Behandlungen (niedrige inpat_id) nimmt die Wahrscheinlichkeit eines Abbruchs stärker mit dem Alter ab. Bei einer höheren Anzahl von Behandlungen ist der Einfluss des Alters weniger stark.
@@ -808,20 +892,20 @@ choose_best_model(model_summaries, "LogLik") #Model 11 hat den besten fit
 # Predicted probabilities
 # Erstelle ein neues Datenset, durch das die interessierenden Variablen variiert werden
 
-coefffix_plot <- sjPlot::plot_model(model12, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+coefffix_plot <- sjPlot::plot_model(model14, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
 
-plot(ggpredict(model12, terms = c("age", "inpat_id")))
+plot(ggpredict(model14, terms = c("age", "inpat_id")))
 
 
 #effekte der prädiktoren unter konstanthaltung aller anderen prädiktoren
-ae <- allEffects(model12)
+ae <- allEffects(model14)
 plot(ae)
 
 plot(ae["age:inpat_id"])
 plot(ae["sex"])
 plot(ae["elix_sum"])
 plot(ae["treat_dur_cat"])
-
+plot(ae["REHA_count_before_INPAT"])
 ```
 
 # Unterschiede zu QWT Modellen:
