@@ -754,7 +754,7 @@ car::vif(vif_model) #no multicollinearity
 
 #Logistische Modelle
 
-```{r multinom_models}
+```{r log_models}
 # Initialisiere einen leeren DataFrame für die Modellanpassungsparameter
 model_summaries <- data.frame(
   Model = character(),
@@ -838,7 +838,8 @@ model14 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + e
 summary(model14)
 add_model_summary(model14, "Model 14") 
 
-model15 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*sex + (1|pragmaid), family = "binomial", data = final_data)  #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist aber knapp nicht signifikant
+model15 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*sex + (1|pragmaid), family = "binomial", data = final_data)
+
 summary(model15)
 add_model_summary(model15, "Model 15") 
 #Ist Modelverbesserung signifikant durch Hinzunahme von inpat_id*sex?
@@ -853,8 +854,7 @@ pchisq(ldif, degfr, lower.tail = FALSE) #.13
 Anova(model12)
 Anova(model12,type="III") # to do: set sum-to-zero contrasts on factors and center numerical covariates
 
-model16 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*elix_sum + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist signifikant
-summary(model16) #Hinzunahme von Interaktion inpat_id*elix*sum verbessert modelfit nicht
+model16 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*elix_sum + (1|pragmaid), family = "binomial", data = final_data) summary(model16) #Hinzunahme von Interaktion inpat_id*elix*sum verbessert modelfit nicht
 add_model_summary(model16, "Model 16") 
 
 
@@ -892,10 +892,11 @@ choose_best_model(model_summaries, "LogLik") #Model 11 hat den besten fit
 # Predicted probabilities
 # Erstelle ein neues Datenset, durch das die interessierenden Variablen variiert werden
 
-coefffix_plot <- sjPlot::plot_model(model14, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+coefffix_plot <- sjPlot::plot_model(model13, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
 
 plot(ggpredict(model14, terms = c("age", "inpat_id")))
 
+graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_inpat.png"), width=7, height=5)
 
 #effekte der prädiktoren unter konstanthaltung aller anderen prädiktoren
 ae <- allEffects(model14)
