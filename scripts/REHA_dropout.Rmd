@@ -7,7 +7,7 @@ output:
     code_folding: hide
 ---
 # To-Dos
-
+- Wie für Dauer kontrollieren?
 - ....
 
 
@@ -22,7 +22,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet")
+packages <- c("data.table", "tidyverse", "glmmTMB", "ggplot2", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet", "ggeffects", "DHARMa", "effects")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -418,7 +418,8 @@ med_diagnoses_reha_employ_qwt_inpat <- med_diagnoses_reha_employ_qwt_inpat %>% f
 
 ```{r select_vars}
 reha_final <- med_diagnoses_reha_employ_qwt_inpat  %>% 
-  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, nationality, DAUER_REHA, DIAG1, BEWILLDIAG, date.treat.start, date.treat.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob))
+  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, nationality, DAUER_REHA, DIAG1, BEWILLDIAG, date.treat.start, date.treat.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob, ENTLASSFORM, date.emp.start, date.emp.end, id_pragma_reha, treatment))
+
 ```
 
 # Speicherplatz freigeben
@@ -426,10 +427,227 @@ reha_final <- med_diagnoses_reha_employ_qwt_inpat  %>%
 ```{r save_data}
 #alle Datenfiles die "all" oder "check" oder "missing" im Namen haben, können gelöscht werden
 #identifiziere alle Objekte, die gelöscht werden können
+objects <- ls()
+objects <- objects[grepl("all|check|missing|fil", objects)]
+#lösche alle Objekte
+rm(list = objects)
+#free unused memory
+gc()
 ```
 
+# Überprüfung der Daten vor Modellierung
+```{r check_data}
+to_factor <- c("emp.type", "sex", "STAATS_ANGE", "MASSN_ART", "DIAG_VERAEND", "pragmaid", "gkv")
+
+# Wandle jede Spalte in der final_reha-Datenstruktur in einen Faktor um
+reha_final[to_factor] <- lapply(reha_final[to_factor], as.factor)
+
+#check for missings
+summary(reha_final) #1x STAATS_ANGE unbekannt, only 5 pers with emp.type == retired -> move to other 
+pragma_id_GKV %>% filter(pragmaid == "dsjSiLpV8T") # nicht deutsch
+reha_final <- reha_final %>%
+  mutate(STAATS_ANGE = fct_recode(STAATS_ANGE, 
+                                   "nicht deutsch" = "unbekannt"),
+         emp.type = fct_recode(emp.type, "other" = "retired"))  # Ersetzen des Faktors
+
+#reha_id
+boxplot(reha_final$reha_id) # looks okay
+cutoff_rehaid <- quantile(reha_final$reha_id, 0.75) + 3*IQR(reha_final$reha_id) 
+
+#elix_sum
+boxplot(reha_final$elix_sum) 
+cutoff_elixsum <- quantile(reha_final$elix_sum, 0.75) + 3*IQR(reha_final$elix_sum) #no values above cutoff
+
+#QWT_count_before_reha
+boxplot(reha_final$QWT_count_before_reha) #some outliers
+cutoff_QWTcount <- quantile(reha_final$QWT_count_before_reha, 0.75) + 3*IQR(reha_final$QWT_count_before_reha) # 4
+table(reha_final$QWT_count_before_reha)
+
+# Arbeitsentscheidung: zunächst keine outlier exkludieren, aber später influential cases anhand Hebelwerte etc checken 
+
+reha_final <- reha_final %>% mutate(VERLAUF = factor(case_when(
+ DIAG_VERAEND == "gebessert" ~ "besser",
+ DIAG_VERAEND == "keine Angabe" ~ NA_character_,  
+ DIAG_VERAEND == "unverändert" ~ "nicht besser",
+ DIAG_VERAEND == "verschlechtert" ~ "nicht besser",
+ TRUE ~ NA_character_  
+), levels = c("besser", "nicht besser")))
+
+vif_model <- glm(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + MASSN_ART + QWT_count_before_reha + INPAT_count_before_reha, data = reha_final, family = binomial)
+
+vif_model_VERLAUF <- glm(VERLAUF ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + MASSN_ART + QWT_count_before_reha + INPAT_count_before_reha, data = reha_final, family = binomial)
+
+car::vif(vif_model)
+car::vif(vif_model_VERLAUF)
+#"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
+```
+#Logistische Modelle
+
+```{r log_models}
+# Initialisiere einen leeren DataFrame für die Modellanpassungsparameter
+model_summaries <- data.frame(
+  Model = character(),
+  Deviance = numeric(),
+  AIC = numeric(),
+  BIC = numeric(),
+  stringsAsFactors = FALSE
+)
+
+add_model_summary <- function(model, model_name) {
+#  summary <- summary(model)
+#  stats <- summary$sumstat
+  model_summaries <<- rbind(model_summaries, data.frame(
+    Model = model_name,
+    LogLik = logLik(model),
+    AIC = AIC(model),
+    BIC = BIC(model)
+  ))
+}
+
+#nur Intercept und random effects
+model1 <- glmmTMB(unpl_drop ~ 1 + (1|pragmaid), family = "binomial", data = reha_final)
+summary(model1)
+add_model_summary(model1, "Intercept")
 
 
+model2 <- glmmTMB(unpl_drop ~ sex + (1|pragmaid), family = "binomial", data = reha_final)
+summary(model2)
+add_model_summary(model2, "Model 2")
+
+model3 <- glmmTMB(unpl_drop ~ sex + age + (1|pragmaid), family = "binomial", data = reha_final)
+summary(model3)
+add_model_summary(model3, "Model 3")
+
+model4 <- glmmTMB(unpl_drop ~ sex + age + reha_id + (1|pragmaid), family = "binomial", data = reha_final)
+summary(model4)
+add_model_summary(model4, "Model 4")
+
+model5 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + (1|pragmaid), family = "binomial", data = reha_final)
+summary(model5)
+add_model_summary(model5, "Model 5")
+
+model6 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + (1|pragmaid), family = "binomial", data = reha_final)
+summary(model6) # Model 6 hat besseres AIC und deviance als Modell 3, aber schlechteres BIC
+add_model_summary(model6, "Model 6")
+
+model7.1 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + (1|pragmaid), family = "binomial", data = reha_final)
+summary(model7.1)
+add_model_summary(model7.1, "Model 7.1")
+
+model7.2 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + char_sum + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
+summary(model7.2)
+add_model_summary(model7.2, "Model 7.2")
+
+model8 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
+summary(model8)
+add_model_summary(model8, "Model 8")
+
+
+model9 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + MASSN_ART + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
+summary(model9)
+add_model_summary(model9, "Model 9")
+
+model10 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + MASSN_ART + QWT_count_before_reha + (1|pragmaid), family = "binomial", data = reha_final) 
+summary(model10)
+add_model_summary(model10, "Model 10")
+
+model11 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + MASSN_ART + QWT_count_before_reha + INPAT_count_before_reha + (1|pragmaid), family = "binomial", data = reha_final) 
+summary(model11)
+add_model_summary(model11, "Model 11")
+
+model12 <- glmmTMB(unpl_drop ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + MASSN_ART + QWT_count_before_reha + INPAT_count_before_reha + age*reha_id + (1|pragmaid), family = "binomial", data = reha_final) 
+summary(model12)
+add_model_summary(model12, "Model 12")
+
+
+#find the best fitting model
+choose_best_model <- function(summary_df, criterion) {
+  if (!criterion %in% names(summary_df)) {
+    stop("Ungültiges Kriterium. Wähle entweder 'LogLik', 'AIC' oder 'BIC'.")
+  }
+
+  if (criterion == "LogLik") {
+    best_model_row <- summary_df[which.max(summary_df[[criterion]]), ]
+  } else {
+    best_model_row <- summary_df[which.min(summary_df[[criterion]]), ]
+  }
+
+  return(best_model_row)
+}
+
+choose_best_model(model_summaries, "BIC") #Intercept
+choose_best_model(model_summaries, "AIC") #Model 10
+choose_best_model(model_summaries, "LogLik") #Model 11
+
+```
+
+# Plot results
+```{r plot results}
+coefffix_plot <- sjPlot::plot_model(model11, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+
+graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_reha.png"), width=7, height=5)
+
+plot(ggpredict(model11, terms = c("age")))
+plot(ggpredict(model11, terms = c("STAATS_ANGE")))
+
+#effekte der prädiktoren unter konstanthaltung aller anderen prädiktoren
+ae <- allEffects(model11)
+plot(ae)
+plot(ae[["sex"]])
+plot(ae[["age"]]) #signifikant
+plot(ae[["reha_id"]])
+plot(ae[["STAATS_ANGE"]])
+plot(ae[["emp.type"]]) #signifikant
+plot(ae[["elix_sum"]])
+plot(ae[["ndistinctATClevel2"]])
+plot(ae[["MASSN_ART"]]) #signifikant
+plot(ae[["QWT_count_before_reha"]])
+plot(ae[["INPAT_count_before_reha"]])
+
+```
+# Model diagnostics
+```{r residuals}
+model_simres <- simulateResiduals(model11)
+plot(model_simres)
+
+
+plotResiduals(model_simres, form = reha_final$MASSN_ART)
+plotResiduals(model_simres, form = reha_final$age)
+plotResiduals(model_simres, form = reha_final$reha_id)
+plotResiduals(model_simres, form = reha_final$STAATS_ANGE)
+```
+
+# Sensitivitäsanalyse mit VERLAUF (gebessert, nicht gebessert)
+```{r sensitivity analyses}
+reha_final_verlauf <- reha_final %>% filter(!is.na(VERLAUF))
+model_verlauf <- glmmTMB(VERLAUF ~ sex + age + reha_id + STAATS_ANGE + emp.type + elix_sum + ndistinctATClevel2 + MASSN_ART + QWT_count_before_reha + INPAT_count_before_reha + (1|pragmaid), family = "binomial", data = reha_final_verlauf) 
+
+summary(model_verlauf)
+
+plot(ggpredict(model_verlauf, terms = c("reha_id")))
+ae <- allEffects(model_verlauf)
+plot(ae)
+plot(ae["sex"])
+
+#The predicted probabilities are small mainly due to the large negative intercept and the #weak effect of reha_id. Even with random effects, the overall model structure is not strong #enough to yield higher probabilities for the VERLAUF outcome. You might need to introduce #additional predictors or re-weight the model to better handle class imbalance.
+testDispersion(model_verlauf) #highly overdispersed (extra variability not predicted by the generalized linear model random component reflects overdispersion), variability in the outcome is not fully explained by the predictors? unusually high number of zeroes (about 87%)? 
+model_simres <- simulateResiduals(model_verlauf)
+plot(model_simres)
+plotResiduals(model_simres)
+plotResiduals(model_simres, form = reha_final_verlauf$sex, 
+              quantreg = FALSE)
+plotResiduals(model_simres, form = reha_final_verlauf$age, 
+              quantreg = FALSE)
+plotResiduals(model_simres, form = reha_final_verlauf$MASSN_ART, 
+              quantreg = FALSE)
+plotResiduals(model_simres, form = reha_final_verlauf$reha_id, 
+              quantreg = FALSE)
+plotResiduals(model_simres, form = reha_final_verlauf$reha_id, 
+              quantreg = FALSE)
+#The distribution for each factor level should be uniformly distributed, so the box should go from 0.25 to 0.75, with the median line at 0.5 (within-group ). To test if deviations from those expecations are significant, KS-tests per group and a Levene test for homogeneity of variances is performed
+
+#Sensitivitäsanalyse muss entweder weggelassen oder angepasst werden, so macht das Modell jedenfalls keinen Sinn
+```
 
 
 ## OLD!!:
