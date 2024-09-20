@@ -17,7 +17,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot")
+packages <- c("data.table", "tidyverse", "ggplot2", "glmmTMB", "comorbidity", "car", "lme4", "ordinal", "export", "mclogit", "sjPlot", "DHARMa")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -58,7 +58,7 @@ filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 ldf <- lapply(filenames, readRDS)
 names(ldf) <- gsub(".rds", "", basename(filenames))
 print(names(ldf))
-names <- c("pragma_id_GKV", "alc_diagnoses", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha")
+names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "reha_new")
 names(ldf) <- names
 #check if all dataframes are loaded
 ls()
@@ -75,9 +75,9 @@ qwt <- qwt %>%
   arrange(pragmaid, date.qwt.start) %>%
   group_by(pragmaid) %>%
   mutate(
-    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+    direkter_anschluss = (date.qwt.start == lag(date.qwt.end, default = NULL)) | (date.qwt.start == lag(date.qwt.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
 
-table(qwt$direkter_anschluss, useNA = "always") #6 with direkter anschluss
+table(qwt$direkter_anschluss, useNA = "always") #52
 
 #check -> okay
 qwt %>% arrange(pragmaid, date.qwt.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.qwt.start, date.qwt.end)
@@ -179,6 +179,12 @@ str(qwt$ENTL301)
 #QWT as factor with new labels
 qwt$ENTL301 <- factor(qwt$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 14, 15, 17, 22), labels = c("regulär", "beendet, nachstat. Beh. vorgesehen", "aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "Verlegung in ein anderes Krankenhaus", "Tod", "Rehaeinrichtung",
 "Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."))
+
+qwt <- qwt %>% mutate(unpl_drop = factor(case_when(
+  ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
+  ENTL301 %in% c("regulär", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung",
+                 "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
+  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
 #was passiert nach interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG?
 ```
 
@@ -280,16 +286,89 @@ qwt <- qwt %>%
   ungroup()
 ```
 
+## Hinzufügen von REHA ID (wie viele REHAs hat eine Person zum Zeitpunkt des QWT bereits gemacht?)
+
+```{r qwt count}
+
+#Daten zusammenführen
+
+reha$treatment <- "reha"
+qwt$treatment <- "qwt"
+
+#rename 
+qwt <- qwt %>% rename(date.treat.start = date.qwt.start, date.treat.end = date.qwt.end)
+reha <- reha %>% rename(date.treat.start = date.reha.start, date.treat.end = date.reha.end)
+
+colnames <- c("date.treat.start", "date.treat.end", "treatment", "pragmaid")
+
+#are colnames in qwt and reha? 
+all(colnames %in% colnames(reha))
+
+qwt_reha <- bind_rows(
+  qwt, reha %>% select(all_of(colnames)))
+
+qwt_reha <- qwt_reha %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(REHA_count_before_qwt = sapply(1:n(), function(i) {
+    if (treatment[i] == "qwt") {
+      sum(treatment[1:(i-1)] == "reha" & date.treat.end[1:(i-1)] <= date.treat.start[i])
+    } else {
+      NA
+    }
+  }))
+
+#check
+qwt_reha %>% select(pragmaid, date.treat.start, date.treat.end, qwt_id, treatment, REHA_count_before_qwt) %>% arrange(pragmaid, date.treat.start) #looks not okay for some cases, but this is due to overlaps in the data, e.g. 0BudrwOpY8 had a qwt while on reha-treatment?
+
+qwt_reha <- qwt_reha %>% filter(treatment == "qwt")
+
+```
+
+## Hinzufügen von INPAT ID (wie viele INPATs hat eine Person zum Zeitpunkt des QWT bereits gemacht?)
+
+```{r inpat count}
+
+#Daten zusammenführen
+inpat$treatment <- "inpat"
+
+#rename 
+inpat <- inpat %>% rename(date.treat.start = date.inpat.start, date.treat.end = date.inpat.end)
+
+#are colnames in qwt and inpat? 
+all(colnames %in% colnames(inpat))
+
+qwt_reha_inpat <- bind_rows(qwt_reha, inpat %>% select(all_of(colnames)))
+
+qwt_reha_inpat <- qwt_reha_inpat %>%
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(INPAT_count_before_qwt = sapply(1:n(), function(i) {
+    if (treatment[i] == "qwt") {
+      sum(treatment[1:(i-1)] == "inpat" & date.treat.end[1:(i-1)] < date.treat.start[i])
+    } else {
+      NA
+    }
+  }))
+
+#check
+qwt_reha_inpat %>% select(pragmaid, date.treat.start, qwt_id, treatment, REHA_count_before_qwt, INPAT_count_before_qwt, REHA_count_before_qwt) %>% arrange(pragmaid, date.treat.start) #okay
+
+qwt_reha_inpat <- qwt_reha_inpat %>% filter(treatment == "qwt")
+
+```
+
+
 
 ## Hinzufügen der Stammdaten - SEX, AGE and nationality
 
 ```{r add_stammdaten}
 #match pragma_id_GKV with qwt based on pragma_id (only columns names sex and yob)
-total_stamm <- left_join(qwt, pragma_id_GKV, by="pragmaid")
+total_stamm <- left_join(qwt_reha_inpat, pragma_id_GKV, by="pragmaid")
 
 total_stamm <- total_stamm %>% 
   select(c(-hivid, -gkv.id, -dak.id, -aok.id, - gkv.y)) %>%
-  mutate(age = as.integer(substr(date.qwt.start, 1, 4)) - yob) %>%
+  mutate(age = as.integer(substr(date.treat.start, 1, 4)) - yob) %>%
   rename(gkv = gkv.x)
 #4 patients with gkv aokdak (aokdak values are only present in the stamm data, but not in the qwt data, keep only gkv from qwt data)
 
@@ -307,7 +386,7 @@ total_employ_all <- left_join(total_stamm, employment, by = "pragmaid")
 
 # Filtern der Zeilen, sodass qwt_start innerhalb des Zeitraums von employ_start und employ_end liegt
 total_employ <- total_employ_all %>%
-  filter(date.qwt.start >= date.emp.start & date.qwt.start <= date.emp.end)
+  filter(date.treat.start >= date.emp.start & date.treat.start <= date.emp.end)
 #do gkv.x and gkv.y have the same values?
 sum(total_employ$gkv.x != total_employ$gkv.y) #0 -> gkv.x and gkv.y have the same values, delete gkv.y and rename gkv.x to gkv
 total_employ <- total_employ %>% 
@@ -317,7 +396,7 @@ total_employ <- total_employ %>%
 nrow(total_employ) - nrow(total_stamm) 
 #after filtering, there are 41 rows less than before
 missing_rows <- total_stamm %>%
-  anti_join(total_employ, by = c("pragmaid", "date.qwt.start", "date.qwt.end")) #für 41 Zeilen gibt es keine employment Daten (-> Lücken in den Daten, siehe unten), diese werden zT exkludiert (aktiver Versichertenstatus ist Inklusionskriterium)
+  anti_join(total_employ, by = c("pragmaid", "date.treat.start", "date.treat.end")) #für 41 Zeilen gibt es keine employment Daten (-> Lücken in den Daten, siehe unten), diese werden zT exkludiert (aktiver Versichertenstatus ist Inklusionskriterium)
 
 total_employ$emp.type <- as.factor(total_employ$emp.type)
 total_employ$sex <- as.factor(total_employ$sex)
@@ -330,17 +409,17 @@ total_employ$source <- as.factor(total_employ$source)
 ```{r check_missing_employment}
 #check if missing employment data is due to interruptions in insured periods
 check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
-  select(pragmaid, date.qwt.start, date.qwt.end, date.ins.start, date.ins.end, gkv.x, gkv.y) 
+  select(pragmaid, date.treat.start, date.treat.end, date.ins.start, date.ins.end, gkv.x, gkv.y) 
 
 sum(check_missing$gkv.x != check_missing$gkv.y) #0 -> gkv.x and gkv.y have the same values
 
 #filter cases where the inpat treatment is covered by insurance
-cases_with_valid_ins <- check_missing %>% filter(date.qwt.start >= date.ins.start & date.qwt.start <= date.ins.end) #there are 8 cases that do have insurance data for the inpatient treatment, but have no corresponding employment data. these cases should be kept in the inpat_employ dataset, as they are insured during the inpatient treatment and the employment status should be set to NA.
+cases_with_valid_ins <- check_missing %>% filter(date.treat.start >= date.ins.start & date.treat.start <= date.ins.end) #there are 8 cases that do have insurance data for the inpatient treatment, but have no corresponding employment data. these cases should be kept in the inpat_employ dataset, as they are insured during the inpatient treatment and the employment status should be set to NA.
 
 # -> some, but not all cases with missing employment data are due to interruptions in insured periods
 
 #add cases with valid insurance to inpat_employ
-total_employ <- bind_rows(total_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.qwt.start %in% cases_with_valid_ins$date.qwt.start & date.qwt.end %in% cases_with_valid_ins$date.qwt.end))
+total_employ <- bind_rows(total_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.treat.start %in% cases_with_valid_ins$date.treat.start & date.treat.end %in% cases_with_valid_ins$date.treat.end))
 
 table(total_employ$emp.type, useNA = "always") # 7 NAs, so the 7 cases without employment infos, but with insurance are added to the total_employ dataset
 ``` 
@@ -394,7 +473,7 @@ nrow(distinct(diagnoses_employ_alltimes, pragmaid, qwt_id)) #3823 -> okay
 diagnoses_employ_fil <- diagnoses_employ_alltimes %>%
   filter(
     #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
-     date.diag.start >= (date.qwt.start - days(180)) & date.diag.start <= date.qwt.start)
+     date.diag.start >= (date.treat.start - days(180)) & date.diag.start <= date.treat.start)
 #Arbeitsdefinition, für stationäre Diagnosen (bzw. alle anderen settings) muss Eingrenzung noch angepasst werden
 
 # GKV X and Y are the same, delete Y and rename X to gkv
@@ -466,9 +545,9 @@ summary(diagnoses_employ$char_sum)
 str(fosterage)
 table(fosterage$fost.degree, useNA = "always")
 # sowohl Pflegegrade (PG) als auch Pflegestufen (PS). Pflegegrade sind ab 2017 gültig, Pflegestufen bis 2016. Wie Pflegestufen in Pflegegrade umrechnen?
-min(qwt$date.qwt.start) #2015-12-11
+min(qwt$date.treat.start) #2015-12-11
 
-unique(qwt$date.qwt.start) %>% sort() #5 QWTs wurden vor 2016 begonnen
+unique(qwt$date.treat.start) %>% sort() #5 QWTs wurden vor 2016 begonnen
 
 #Quelle: https://www.gkv-spitzenverband.de/media/dokumente/service_1/Pflegebegutachtung_2017_von_Pflegestufen_zu_Pflegegraden.pdf
 # ohne PEA funktioniert Umrechnung nicht eindeutig. Daher wird die Variable zu Pflegebedarf vorhanden/nicht vorhanden kodiert
@@ -497,24 +576,26 @@ fost_diagnoses_employ_alltimes <- left_join(diagnoses_employ, fost_qwt, by = "pr
 
 
 fost_diagnoses_employ_fil <- fost_diagnoses_employ_alltimes %>%
-  filter((date.qwt.start >= date.fost.start & is.na(date.fost.end)) | (date.qwt.start >= date.fost.start & date.qwt.start <= date.fost.end))
+  filter((date.treat.start >= date.fost.start & is.na(date.fost.end)) | (date.treat.start >= date.fost.start & date.treat.start <= date.fost.end))
 
-nrow(distinct(fost_diagnoses_employ_fil, pragmaid)) #98 patients do have fosterage data that is within the QWT period
+nrow(distinct(fost_diagnoses_employ_fil, pragmaid)) #97 patients do have fosterage data that is within the QWT period
 
 # GKV X - GKV Y
 sum(fost_diagnoses_employ_fil $gkv.x != fost_diagnoses_employ_fil $gkv.y) #0 -> gkv.x and gkv.y are the same, delete gkv.y and rename gkv.x to gkv
 fost_diagnoses_employ_fil  <- fost_diagnoses_employ_fil  %>% 
   select(-gkv.y) %>%
-  rename(gkv = gkv.x)
+  rename(gkv = gkv.x) %>%
+  ungroup()
 
 # check data that is filtered out
 #check_missing_fost <- total_fost_all %>% 
-#  anti_join(fost_diagnoses_employ_fil , by = c("pragmaid", "date.qwt.start", "date.qwt.end", "date.fost.start", "date.fost.end")) %>%
-#  select(pragmaid, date.qwt.start, date.qwt.end, date.fost.start, date.fost.end, fost.degree) # -> okay
+#  anti_join(fost_diagnoses_employ_fil , by = c("pragmaid", "date.treat.start", "date.treat.end", "date.fost.start", "date.fost.end")) %>%
+#  select(pragmaid, date.treat.start, date.treat.end, date.fost.start, date.fost.end, fost.degree) # -> okay
 
 
 # add fost_diagnoses_employ_fil  to diagnoses_employ and set fosterage to NA if no fosterage data is available
 fost_diagnoses_employ <- diagnoses_employ %>%
+  ungroup() %>%
   left_join(fost_diagnoses_employ_fil  %>% select(id_pragma_qwt, fost.degree), by = "id_pragma_qwt") %>%
   mutate(fost.degree_bin = as.factor(ifelse(is.na(fost.degree), "nein", "ja")))
 
@@ -542,7 +623,7 @@ nrow(distinct(med_fost_diagnoses_employ_alltimes, pragmaid)) #1910 patients -> o
 
 med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_alltimes %>%
 # only keep medication data that happend during the 3 months before the QWT
-  filter(date.medi.disp >= (date.qwt.start - days(30)) & date.medi.disp <= date.qwt.start) %>%
+  filter(date.medi.disp >= (date.treat.start - days(30)) & date.medi.disp <= date.treat.start) %>%
   filter(ATC != "")
 
 nrow(distinct(med_fost_diagnoses_employ_fil, pragmaid, qwt_id)) # 1475 treatments have medication data in the timeframe of interest
@@ -556,8 +637,8 @@ med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>%
   ungroup()
 
 #missing_med <- total_med_all %>% 
-#  anti_join(med_fost_diagnoses_employ_fil, by = c("pragmaid", "date.qwt.start", "date.qwt.end", "date.medi.disp")) %>%
-#  select(pragmaid, date.qwt.start, date.qwt.end, date.medi.disp) # -> okay
+#  anti_join(med_fost_diagnoses_employ_fil, by = c("pragmaid", "date.treat.start", "date.treat.end", "date.medi.disp")) %>%
+#  select(pragmaid, date.treat.start, date.treat.end, date.medi.disp) # -> okay
 #rm(missing_med)
 
 #new variable with level 2 ATCs (therapeutische Untergruppe)
@@ -605,7 +686,7 @@ table(med_fost_diagnoses_employ$polymedi_level2)
 # Auswahl relevanter Variablen
 ```{r select_vars}
 final_data <- med_fost_diagnoses_employ %>% 
-  select(-c(KH_FALL_ID, date.kkh.start, date.kkh.end, date.qwt.start, date.qwt.end, date.emp.start, date.emp.end, id_pragma_qwt, fost.degree, source, icd.primary, icd.secondary, icd.admission, icd.other, died, date.death, ward))
+  select(-c(KH_FALL_ID, date.kkh.start, date.kkh.end, date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_qwt, fost.degree, source, icd.primary, icd.secondary, icd.admission, icd.other, died, date.death, ward))
 ```
 
 # Speicherplatz freigeben
@@ -677,9 +758,12 @@ final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClev
 # check for multicollinearity
 #Just run “linear regression” after assuming categorical dependent variable as continuous variable
 final_data$treat_dur_cat_num <- as.numeric(final_data$treat_dur_cat)
-vif_model <- lm(treat_dur_cat_num ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2, data = final_data)
+vif_model <- lm(treat_dur_cat_num ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + REHA_count_before_qwt + INPAT_count_before_qwt, data = final_data)
+
+vif_model_ENTL <- glm(unpl_drop ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + REHA_count_before_qwt + INPAT_count_before_qwt + treat_dur_cat, data = final_data, family = "binomial")
 
 car::vif(vif_model) #no multicollinearity
+car::vif(vif_model_ENTL)
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 
 ```
@@ -756,6 +840,18 @@ model11 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + cha
 getSummary.mblogit(model11)
 add_model_summary(model11, "Model 11") # keine Verbesserung gegenüber Modell 9 (außer in deviance)
 
+model12 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + char_sum + ndistinctATClevel2 + REHA_count_before_qwt, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model12)
+add_model_summary(model12, "Model 12") 
+
+model13 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + char_sum + ndistinctATClevel2 + REHA_count_before_qwt + INPAT_count_before_qwt, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model13)
+add_model_summary(model13, "Model 13") 
+
+model14 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + char_sum + ndistinctATClevel2 + REHA_count_before_qwt + INPAT_count_before_qwt + age*qwt_id, random = ~ 1 | pragmaid, data = final_data)
+getSummary.mblogit(model14) #signifikante Interaktion
+add_model_summary(model14, "Model 14") 
+
 #find the best fitting model
 choose_best_model <- function(summary_df, criterion) {
   if (!criterion %in% names(summary_df)) {
@@ -769,9 +865,29 @@ choose_best_model(model_summaries, "BIC") #Model 4
 choose_best_model(model_summaries, "AIC") #Model 9 
 choose_best_model(model_summaries, "Deviance") #Model 11 
 
-sjPlot::plot_model(model9)
+coefffix_plot <- sjPlot::plot_model(model14, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+
+graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_qwt.png"), width=7, height=5)
+```
+# Sensitivitätsanalyse mit unpl_drop
+
+```{r sensitivity}
+model1_ENTL <- glmmTMB(unpl_drop ~ sex + age + qwt_id + nationality + emp.type + char_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + INPAT_count_before_qwt + REHA_count_before_qwt + (1|pragmaid), family = "binomial", data = final_data) 
+summary(model1_ENTL) 
+
+coefffix_plot_ENTL <- sjPlot::plot_model(model1_ENTL, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+
+graph2doc(x = coefffix_plot_ENTL, file=file.path(folder_plot, "coefffix_plot_qwt_ENTL.png"), width=7, height=5)
 
 ```
+# model checking and diagnostics
+
+```{r residuals}
+model_simres <- simulateResiduals(model1_ENTL)
+plot(model_simres)
+```
+
+
 # Predicted Probabilities 
 
 ```{r plot_pred_probs}
@@ -972,22 +1088,22 @@ ggplot(qwt, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(width
 #  group_by(KH_FALL_ID, pragmaid) %>% 
 #  filter(n() > 1) #es gibt einige Personen, die innerhalb eines KH Aufenthalts mehrere Rehas gemacht haben
 
-#rename ops.date to date.qwt.start
+#rename ops.date to date.treat.start
 #qwt_OPS <- qwt_OPS %>% 
 #  filter(grepl("^8-985|^8985|^9-647|^9647", OPS)) %>%
-#  rename(date.qwt.start = date.ops) %>%
-#  mutate(date.qwt.start = as.Date(date.qwt.start))
+#  rename(date.treat.start = date.ops) %>%
+#  mutate(date.treat.start = as.Date(date.treat.start))
 
-#qwt_full <- left_join(qwt, qwt_OPS, by = c("KH_FALL_ID", "pragmaid", "gkv", "date.qwt.start"))
+#qwt_full <- left_join(qwt, qwt_OPS, by = c("KH_FALL_ID", "pragmaid", "gkv", "date.treat.start"))
 
 
 
 #add diagnoses to total_employ and filter for diagnoses according to time criteria and exclude alcohol diagnoses
 #diagnoses_employ_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
 #  filter(
-#    (date.diag.start <= date.qwt.start & date.diag.end >= (date.qwt.end - months(1))) |  # Diagnosestart muss vor oder gleich QWT-Start liegen und Diagnose muss noch bis mindestens 1 Monat vor QWT-Ende laufen
-#    (is.na(date.diag.end) & date.diag.start >= (date.qwt.start - months(1)) & date.diag.start <= #date.qwt.start) |  # Falls date.diag.end NA ist, darf date.diag.start nur bis zu einem Monat vor QWT-Start und maximal gleich QWT-Start liegen
-#    (is.na(date.diag.start) & date.diag.end >= (date.qwt.end - months(1)) & date.diag.end <= (date.qwt.end + weeks(1)))  # Falls date.diag.start NA ist, darf date.diag.end nur bis zu einem Monat vor und eine Woche nach QWT-Ende liegen
+#    (date.diag.start <= date.treat.start & date.diag.end >= (date.treat.end - months(1))) |  # Diagnosestart muss vor oder gleich QWT-Start liegen und Diagnose muss noch bis mindestens 1 Monat vor QWT-Ende laufen
+#    (is.na(date.diag.end) & date.diag.start >= (date.treat.start - months(1)) & date.diag.start <= #date.treat.start) |  # Falls date.diag.end NA ist, darf date.diag.start nur bis zu einem Monat vor QWT-Start und maximal gleich QWT-Start liegen
+#    (is.na(date.diag.start) & date.diag.end >= (date.treat.end - months(1)) & date.diag.end <= (date.treat.end + weeks(1)))  # Falls date.diag.start NA ist, darf date.diag.end nur bis zu einem Monat vor und eine Woche nach QWT-Ende liegen
 #  ) %>%
 #  filter(icd.alc == "FALSE") %>%
 #  distinct(pragmaid, qwt_id, icd, .keep_all = TRUE)
@@ -997,7 +1113,7 @@ ggplot(qwt, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(width
 test_df <- data.frame(
   pragmaid = 1:6,
   gkv = c("aok", "aok", "dak", "dak", "dak", "aok"),
-  date.qwt.start = as.Date(c('2021-01-01', '2021-06-01', '2021-07-01', '2021-10-01', '2022-01-01', '2022-04-01')),
+  date.treat.start = as.Date(c('2021-01-01', '2021-06-01', '2021-07-01', '2021-10-01', '2022-01-01', '2022-04-01')),
   setting = c("outpatient", "inpatient", "outpatient", "inpatient", "outpatient", "outpatient"),
   date.diag.start = as.Date(c('2019-07-01', '2020-11-01', '2021-03-01', '2021-09-01', '2021-11-01', '2022-01-01')),
   qwt_id = 1:6,
@@ -1006,8 +1122,8 @@ test_df <- data.frame(
 
 result <- test_df %>%
   mutate(test_column = case_when(
-    (setting == "outpatient" & date.diag.start >= (date.qwt.start - months(6)) & date.diag.start <= date.qwt.start) |
-    (setting != "outpatient" & date.diag.start >= (date.qwt.start - months(6)) & date.diag.start <= date.qwt.start) ~ 1,
+    (setting == "outpatient" & date.diag.start >= (date.treat.start - months(6)) & date.diag.start <= date.treat.start) |
+    (setting != "outpatient" & date.diag.start >= (date.treat.start - months(6)) & date.diag.start <= date.qwt.start) ~ 1,
     TRUE ~ 0
   ))
 #----------------------------------------------
