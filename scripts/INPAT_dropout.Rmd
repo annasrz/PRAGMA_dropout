@@ -57,62 +57,117 @@ if (!file.exists(folder_plot)) {
 ```{r data_import}
 print(getwd())
 datapath <- file.path("..", "input") 
-#read in all files in datapath 
+#read in all RDS-files in datapath 
 filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
+
+names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "reha_new")
+
+if (length(filenames) != length(names)) {
+  stop("Die Anzahl der Dateien stimmt nicht mit Anzahl names überein.")
+}
 
 #save all files as separate dataframes
 ldf <- lapply(filenames, readRDS)
-names(ldf) <- gsub(".rds", "", basename(filenames))
+names(ldf) <- names[1:length(ldf)]
 print(names(ldf))
-names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "reha_new")
-names(ldf) <- names
-#check if all dataframes are loaded
-ls()
 list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
-rm(ldf)
 ```
 
 # Daten vorbereiten
 
+## Daten Struktur
+```{r data_structure}
+str(inpat)
+inpat$n.days <- as.integer(inpat$n.days)
+
+#convert pragmaid to factor in all dataframes
+# harmonise column names
+#
+
+
+ldf <- lapply(names(ldf), function(df_name) {
+  df <- ldf[[df_name]]
+  
+  # pragmaid in Faktor umwandeln, falls vorhanden
+  if ("pragmaid" %in% colnames(df)) {
+    df <- df %>%
+      mutate(pragmaid = as.factor(pragmaid))
+  }
+  
+  if (df_name %in% c("reha_new", "reha", "inpat", "qwt")) {
+    
+    date_columns <- grep("^date\\.(inpat|qwt|drvreha|reha)\\.(start|end)$", colnames(df), value = TRUE)
+    
+    # Wenn solche Spalten existieren, benenne sie um
+    if (length(date_columns) > 0) {
+      # Ersetze "date.[irgendwas]" durch "date.treat"
+      new_names <- gsub("^date\\..*\\.", "date.treat.", date_columns)
+      df <- df %>%
+        rename_with(~ new_names, all_of(date_columns))
+      
+      treatment_types <- gsub("^date\\.(.*)\\..*$", "\\1", date_columns)  # Extrahiere den Mittelteil
+      unique_treatments <- unique(treatment_types)
+      print(treatment_types)
+      df <- df %>%
+        mutate(treatment = factor(unique_treatments[1]))  # Füge die Spalte treatment hinzu
+    }
+  }
+  
+  return(df)
+})
+
+# Überprüfen der Struktur von ldf, um sicherzustellen, dass die Namen korrekt sind
+str(ldf)
+names(ldf) <- names[1:length(ldf)]
+
+list2env(ldf, envir = .GlobalEnv)
+```
+
 ## Check Zeiträume
 
-```{r check_dates}
+```{r check_immconsec}
 
 ## DIREKTE ANSCHLÜSSE
 #wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
 
 inpat <- inpat %>%
-  arrange(pragmaid, date.inpat.start) %>%
+  arrange(pragmaid, date.treat.start) %>%
   group_by(pragmaid) %>%
   mutate(
-    direkter_anschluss = (date.inpat.start == lag(date.inpat.end, default = NULL)) | (date.inpat.start == lag(date.inpat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
 
 table(inpat$direkter_anschluss, useNA = "always") #14 with direkter anschluss
 
 #check -> okay
-inpat %>% arrange(pragmaid, date.inpat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.inpat.start, date.inpat.end)
+inpat %>% arrange(pragmaid, date.treat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.treat.start, date.treat.end)
+```
+
+## Optional: Direkte Anschlüsse zu einem Treatment zusammenfassen
+
+```{r combine_consectreatments}
 
 inpat <- inpat %>% 
   group_by(pragmaid) %>%
-  arrange(date.inpat.start) %>%
+  arrange(date.treat.start) %>%
   mutate(
-    date.inpat.start = case_when(
-      direkter_anschluss ~ lag(date.inpat.start),
-      TRUE ~ date.inpat.start
+    date.treat.start = case_when(
+      direkter_anschluss ~ lag(date.treat.start),
+      TRUE ~ date.treat.start
     )
   ) %>%
   filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
   ungroup()
+```
 
-## are there any OVERLAPS between treatments within pragmaid?
+## Any OVERLAPS between treatments within pragmaid?
 
-inpat$n.days <- as.integer(inpat$n.days)
+```{r check_overlaps}
 
 overlap_check <- inpat %>%
   group_by(pragmaid) %>%
   summarize(
     overlap = any(sapply(1:n(), function(i) {
-    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] > date.inpat.start[-i])
+    any(date.treat.start[i] < date.treat.end[-i] & date.treat.end[i] > date.treat.start[-i])
   }))) %>%
   filter(overlap)  
 
@@ -124,7 +179,7 @@ inpat$overlap <- FALSE
 inpat <- inpat %>%
   group_by(pragmaid) %>%
   mutate(overlap = sapply(1:n(), function(i) {
-    any(date.inpat.start[i] < date.inpat.end[-i] & date.inpat.end[i] > date.inpat.start[-i])
+    any(date.treat.start[i] < date.treat.end[-i] & date.treat.end[i] > date.treat.start[-i])
   }))
 
 table(inpat$overlap, useNA = "always") #45 cases with overlap
@@ -132,25 +187,28 @@ table(inpat$overlap, useNA = "always") #45 cases with overlap
 # Plot erstellen, um Überlappungen zu visualisieren
 ggplot(inpat %>% filter(pragmaid %in% overlap_check$pragmaid), 
        aes(y = pragmaid)) +
-  geom_segment(aes(x = date.inpat.start, 
-                   xend = date.inpat.end, 
+  geom_segment(aes(x = date.treat.start, 
+                   xend = date.treat.end, 
                    yend = pragmaid, 
                    alpha = as.factor(overlap)),
                size = 5) +
   scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1)) +
   labs(x = "Date", y = "Pragma ID") +
   theme_minimal() #some overlaps are not visible, as they are very short (1 day)
+```
 
-# remove overlapping treatments
+## Optional: Overlaps in treatments entfernen
+```{r remove_overlaps}
+
 cases_to_remove <- inpat %>% 
   filter(overlap == TRUE) %>%
   group_by(pragmaid) %>%
-  arrange(pragmaid, date.inpat.start) %>%
+  arrange(pragmaid, date.treat.start) %>%
   mutate(group_overlap = cumsum(
       coalesce(
-        as.logical(date.inpat.start > lag(date.inpat.end, n = 1, default = first(date.inpat.start)) &
-                   date.inpat.start > lag(date.inpat.end, n = 2, default = first(date.inpat.start)) &
-                   date.inpat.start > lag(date.inpat.end, n = 3, default = first(date.inpat.start))
+        as.logical(date.treat.start > lag(date.treat.end, n = 1, default = first(date.treat.start)) &
+                   date.treat.start > lag(date.treat.end, n = 2, default = first(date.treat.start)) &
+                   date.treat.start > lag(date.treat.end, n = 3, default = first(date.treat.start))
         ), TRUE
       ))) %>%
   group_by(pragmaid, group_overlap) %>%
@@ -160,7 +218,7 @@ cases_to_remove <- inpat %>%
     TRUE ~ "remove"
   ))
   
-cases_to_remove %>% arrange(pragmaid, date.inpat.start) %>% select(pragmaid, date.inpat.start, date.inpat.end, overlap, group_overlap, keep)
+cases_to_remove %>% arrange(pragmaid, date.treat.start) %>% select(pragmaid, date.treat.start, date.treat.end, overlap, group_overlap, keep)
 
 #common columns in cases_to_remove and inpat
 common_cols <- intersect(names(cases_to_remove), names(inpat))
@@ -180,25 +238,40 @@ inpat <- inpat %>%
 ### ENTLASS301
 
 ```{r recode_ENTL}
-table(inpat$ENTL301)
+labels_entl301 <- c(
+  "1" = "regulär",
+  "2" = "beendet, nachstat. Beh. vorgesehen",
+  "3" = "aus sonstigen Gründen beendet",
+  "4" = "gegen ärztlichen Rat beendet",
+  "6" = "Verlegung in ein anderes Krankenhaus",
+  "7" = "Tod",
+  "9" = "Rehaeinrichtung",
+  "10" = "Pflegeeinrichtung",
+  "14" = "aus sonst. Gründen beend., nachstat. Beh. Vorges.",
+  "15" = "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.",
+  "17" = "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG",
+  "22" = "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."
+)
 
-#inpat as factor with new labels
-inpat$ENTL301 <- factor(inpat$ENTL301, levels = c(1, 2, 3, 4, 6, 7, 9, 10, 13, 14, 15, 17, 22), labels = c("regulär", "beendet, nachstat. Beh. vorgesehen", "aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "Verlegung in ein anderes Krankenhaus", "Tod", "Rehaeinrichtung",
-"Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."))
-#was passiert nach interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG?
+inpat$ENTL301 <- factor(inpat$ENTL301, levels = names(labels_entl301), labels = labels_entl301)
 
-
-#Einteilung der ENTLASS Gründe in "regulär" vs "nicht regulär" (wenig sensitiv, aber spezifisch, dh wahrscheinlich werden viele Fälle verpasst, die ungeplant abgebrochen haben, aber dafür wenig falsch positive, dh hohe spezifität)
+#Einteilung der ENTLASS Gründe in "ungeplant abgebrochen" vs "regulär beendet bzw. nicht ungeplant abgebrochen" (wenig sensitiv, aber spezifisch, dh wahrscheinlich werden viele Fälle verpasst, die ungeplant abgebrochen haben, aber dafür wenig falsch positive, dh hohe spezifität)
 inpat <- inpat %>% 
   filter(ENTL301 != "Tod") %>%
   mutate(unpl_drop = factor(case_when(
   ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
   ENTL301 %in% c("regulär", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung",
-                 "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
+                 "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
   TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
+
+table(inpat$ENTL301, useNA = "always")
+table(inpat$unpl_drop, useNA = "ifany")
 
 prop.table(table(inpat$unpl_drop, useNA = "ifany"))
 ggplot(inpat, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(width = 0.1) + theme(axis.text.x = element_text(angle = 35, hjust = 1)) + ylim(NA, 75)
+
+#Fallzahl
+inpat %>% filter(ENTL301 != "Tod") %>% summarise(n = n(), npragmaid = n_distinct(pragmaid))
 
 ```
 
@@ -259,45 +332,27 @@ ggplot(inpat, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(wid
 #graph2doc(x = treatdur_ETNL_qwt_inpat, file=file.path(folder_plot, "treatdur_ETNL_qwt_inpat.png"), width=10, height=7)
 ```
 
-Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur wenige Tage dauern. Es gibt eine ähnliche, aber nicht ganz so stark ausgepärgte zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche und 21 Tage. Die ENTL301-Variable wird trotz dieser Inkonsistenzen verwendet, um einen ungeplanten Dropout zu operationalisieren.
+Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur wenige Tage dauern. Es gibt eine dern QWT Behandlungen ähnliche, aber nicht ganz so stark ausgepärgte zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche und 21 Tage. Die ENTL301-Variable wird trotz dieser Inkonsistenzen verwendet, um einen ungeplanten Dropout zu operationalisieren.
 
 Als alternative Operationalisierung der AV Behandlungserfolg des Aufenthalts stattdessen (wie mit den QWT Daten) die Anzahl der Tage in Behandlung heranzuziehen, macht hier nicht so viel Sinn, weil die Varianz sehr groß ist und es kaum extrerne Validierung gibt und die inhaltliche Bedeutung unklar ist. Dementsprechend müssen wir auf die ENTL301 zurückgreifen. 
-
-### Behandlungsdauer als AV
-
-```{r create vars}
-#qwt_inpat <- qwt_inpat %>%
-#  mutate(treat_dur_cat = factor(case_when(
-#  #more than or 21 days in treatment
-#  n.days >= 21 ~ 3,
-#  #between 7 and 20 days (inclusive)
-#  n.days >= 7 & n.days < 21 ~ 2,
-#  #between 0 and 6 days (inclusive)
-#  n.days >= 0 & n.days < 7 ~ 1,
-#  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
-
-#check distribution
-#ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
-
-```
 
 # Prädiktoren
 
 ## Validierung inpat_id
 
 ```{r check_qwt_id}
-# does the inpat_id increases with increasing date.inpat.start?
+# does the inpat_id increases with increasing date.treat.start?
 inpat_check <- inpat %>% 
   group_by(pragmaid) %>%
-  arrange(date.inpat.start) %>%
+  arrange(date.treat.start) %>%
   mutate(inpat_id_ordered = row_number()) %>%
-  select(pragmaid, inpat_id, inpat_id_ordered, date.inpat.start, date.inpat.end) #inpat_id was unordered before. therefore, replace inpat_id with inpat_id_ordered
+  select(pragmaid, inpat_id, inpat_id_ordered, date.treat.start, date.treat.end) #inpat_id was unordered before. therefore, replace inpat_id with inpat_id_ordered
 
-#correct inpat_id, so that it is ordered by date.inpat.start
+#correct inpat_id, so that it is ordered by date.treat.start
 inpat <- inpat %>% 
   group_by(pragmaid) %>%
 #  filter(ENTL301 != "Tod") %>% #exclude cases with ENTL301 == Tod)
-  arrange(date.inpat.start) %>%
+  arrange(date.treat.start) %>%
   mutate(inpat_id = row_number()) %>%
   mutate(treat_dur_cat = factor(case_when(
   #more than or 20 days in treatment
@@ -316,16 +371,13 @@ inpat <- inpat %>%
 #match pragma_id_GKV with inpat based on pragma_id to get sex and age information 
 total_stamm <- left_join(inpat, pragma_id_GKV, by="pragmaid")
 
-
 table(total_stamm$gkv.x, useNA = "always")
 table(total_stamm$gkv.y, useNA = "always") # 7 cases that are insured by both AOK and DAK (this information is not needed for the analysis, so keep only the insurence information from gkv.x)
 
 total_stamm <- total_stamm %>% 
   select(c(-hivid, -gkv.id, -dak.id, -aok.id, - gkv.y)) %>%
-  mutate(age = as.integer(substr(date.inpat.start, 1, 4)) - yob) %>% #calculate age at the beginning of the inpatient treatment
+  mutate(age = as.integer(substr(date.treat.start, 1, 4)) - yob) %>% #calculate age at the beginning of the inpatient treatment
   rename(gkv = gkv.x) #rename gkv.x to gkv
-
-total_stamm$pragmaid <- factor(total_stamm$pragmaid)
 
 table(total_stamm$sex, useNA = "always") # 0 NAs
 summary(total_stamm$age) # 0 NAs
@@ -334,7 +386,7 @@ summary(total_stamm$age) # 0 NAs
 ## Hinzufügen Emplyoment Status
 
 ```{r add_employment}
-nrow(distinct(total_stamm, pragmaid, inpat_id)) #3887 Fälle
+nrow(distinct(total_stamm, pragmaid, inpat_id)) #3833 Fälle bzw 3885 Fälle (je nach Ausschluss von overlapping bzw. direkten Anschlüssen)
 employ_unfiltered <- left_join(total_stamm, employment, by = "pragmaid")
 
 table(employ_unfiltered$gkv.x, useNA = "always")
@@ -345,7 +397,7 @@ employ_unfiltered <- employ_unfiltered %>%
   rename(gkv = gkv.x) #rename gkv.x to gkv
 
 inpat_employ <- employ_unfiltered %>%
-  filter(date.inpat.start >= date.emp.start & date.inpat.start <= date.emp.end)
+  filter(date.treat.start >= date.emp.start & date.treat.start <= date.emp.end)
 
 nrow(distinct(inpat_employ, pragmaid, inpat_id))
 nrow(inpat_employ) - nrow(total_stamm) # there are 30 cases less than before - why?
@@ -361,15 +413,15 @@ employment %>% filter(pragmaid %in% missing_rows$pragmaid) %>% group_by(pragmaid
 ```{r check_missing_employment}
 #check if missing employment data is due to interruptions in insured periods
 check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
-  select(pragmaid, date.inpat.start, date.inpat.end, date.ins.start, date.ins.end, gkv.x) 
+  select(pragmaid, date.treat.start, date.treat.end, date.ins.start, date.ins.end, gkv.x) 
 
 #filter cases where the inpat treatment is covered by insurance
-cases_with_valid_ins <- check_missing %>% filter(date.inpat.start >= date.ins.start & date.inpat.start <= date.ins.end) #there are 8 cases that do have insurance data for the inpatient treatment, but have no corresponding employment data. these cases should be kept in the inpat_employ dataset, as they are insured during the inpatient treatment and the employment status should be set to NA.
+cases_with_valid_ins <- check_missing %>% filter(date.treat.start >= date.ins.start & date.treat.start <= date.ins.end) #there are 8 cases that do have insurance data for the inpatient treatment, but have no corresponding employment data. these cases should be kept in the inpat_employ dataset, as they are insured during the inpatient treatment and the employment status should be set to NA.
 
 # -> some, but not all cases with missing employment data are due to interruptions in insured periods
 
 #add cases with valid insurance to inpat_employ
-inpat_employ <- bind_rows(inpat_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.inpat.start %in% cases_with_valid_ins$date.inpat.start))
+inpat_employ <- bind_rows(inpat_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.treat.start %in% cases_with_valid_ins$date.treat.start))
 
 table(inpat_employ$emp.type, useNA = "always") # 8 NAs, so the 8 cases without employment infos, but with insurance are added to the inpat_employ dataset
 ```
@@ -420,7 +472,7 @@ nrow(distinct(diagnoses_inpat_employ_alltimes, pragmaid, inpat_id)) #3865 -> oka
 diagnoses_inpat_employ_fil <- diagnoses_inpat_employ_alltimes %>%
   filter(
     #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
-     date.diag.start >= (date.inpat.start - days(180)) & date.diag.start <= date.inpat.start)
+     date.diag.start >= (date.treat.start - days(180)) & date.diag.start <= date.treat.start)
 #Arbeitsdefinition, evtl für stationäre Diagnosen (bzw. alle anderen settings) Eingrenzung anpassen?
 
 sum(diagnoses_inpat_employ_fil$gkv.x != diagnoses_inpat_employ_fil$gkv.y) # 33 cases where the insurance information is not the same in the diagnoses data and the inpat data
@@ -507,7 +559,7 @@ fost_diagnoses_inpat_employ_alltimes <- left_join(diagnoses_inpat_employ, fost_i
 
 
 fost_diagnoses_inpat_employ_fil <- fost_diagnoses_inpat_employ_alltimes %>%
-  filter((date.inpat.start >= date.fost.start & is.na(date.fost.end)) | (date.inpat.start >= date.fost.start & date.inpat.start <= date.fost.end))
+  filter((date.treat.start >= date.fost.start & is.na(date.fost.end)) | (date.treat.start >= date.fost.start & date.treat.start <= date.fost.end))
 
 nrow(distinct(fost_diagnoses_inpat_employ_fil, pragmaid)) # 139 patients do have a pflegegrad/stufe during the beginning of the inpatient treatment
 
@@ -543,7 +595,7 @@ nrow(distinct(med_fost_diagnoses_inpat_employ_alltimes, pragmaid)) # 1780 -> oka
 
 med_fost_diagnoses_inpat_employ_fil <- med_fost_diagnoses_inpat_employ_alltimes %>%
   # only keep medication data that happend during the 3 months before the inpatient treatment
-  filter(date.medi.disp >= (date.inpat.start - days(30)) & date.medi.disp <= date.inpat.start) %>%
+  filter(date.medi.disp >= (date.treat.start - days(30)) & date.medi.disp <= date.treat.start) %>%
   filter(ATC != "")
 
 nrow(distinct(med_fost_diagnoses_inpat_employ_fil, id_pragma_inpat)) # 1513 inpatient treatments have medication data in the timeframe of interest
@@ -598,20 +650,8 @@ hist(med_fost_diagnoses_inpat_employ$ndistinctATClevel2)
 
 #Daten zusammenführen
 
-med_fost_diagnoses_inpat_employ$treatment <- "inpat"
-qwt$treatment <- "qwt"
-
-#rename 
-qwt <- qwt %>% rename(date.treat.start = date.qwt.start, date.treat.end = date.qwt.end)
-med_fost_diagnoses_inpat_employ <- med_fost_diagnoses_inpat_employ %>% rename(date.treat.start = date.inpat.start, date.treat.end = date.inpat.end)
-
-colnames <- c("date.treat.start", "date.treat.end", "treatment", "pragmaid")
-
-#are colnames in qwt and inpat? 
-all(colnames %in% colnames(qwt))
-
 med_fost_diagnoses_inpat_employ_qwt <- bind_rows(
-  med_fost_diagnoses_inpat_employ, qwt %>% select(all_of(colnames)))
+  med_fost_diagnoses_inpat_employ, qwt %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
 med_fost_diagnoses_inpat_employ_qwt <- med_fost_diagnoses_inpat_employ_qwt %>%
   group_by(pragmaid) %>%
@@ -634,18 +674,10 @@ med_fost_diagnoses_inpat_employ_qwt <- med_fost_diagnoses_inpat_employ_qwt %>% f
 ## Hinzufügen von REHA ID (wie viele Rehas hat eine Person zum Zeitpunkt des INPAT treatments bereits gemacht?)
 
 ```{r reha count}
-
-#Daten zusammenführen (reha und nicht reha_new Daten, da in den reha daten sowohl GKV als auch DRV vorhanden sind)
-reha$treatment <- "reha"
-
-#rename 
-reha <- reha %>% rename(date.treat.start = date.reha.start, date.treat.end = date.reha.end)
-
-#are colnames in qwt and inpat? 
-all(colnames %in% colnames(reha))
+#Daten zusammenführen (mit reha statt der reha_new Daten, da in den reha daten sowohl GKV als auch DRV vorhanden sind)
 
 med_fost_diagnoses_inpat_employ_qwt_reha <- bind_rows(
-  med_fost_diagnoses_inpat_employ_qwt, reha %>% select(all_of(colnames)))
+  med_fost_diagnoses_inpat_employ_qwt, reha %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
 med_fost_diagnoses_inpat_employ_qwt_reha <- med_fost_diagnoses_inpat_employ_qwt_reha %>%
   group_by(pragmaid) %>%
@@ -687,13 +719,14 @@ gc()
 
 # Überprüfung der Daten vor Modellierung
 
+## Ausreißer, fehlende Werte und Datentypen
+
 ```{r check_data}
 
 final_data$emp.type <- as.factor(final_data$emp.type)
 final_data$sex <- as.factor(final_data$sex)
 final_data$nationality <- as.factor(final_data$nationality)
 final_data$gkv <- as.factor(final_data$gkv)
-final_data$pragmaid <- as.factor(final_data$pragmaid)
 
 #check for missings
 summary(final_data)
@@ -719,36 +752,73 @@ cutoff <- quantile(final_data$n.days, 0.75) + 3*IQR(final_data$n.days)
 boxplot(final_data$char_sum) # some outliers
 cutoff_char <- quantile(final_data$char_sum, 0.75) + 3*IQR(final_data$char_sum)
 cutoff_char
-final_data <- final_data %>% filter(char_sum <= cutoff_char)
+#final_data <- final_data %>% filter(char_sum <= cutoff_char)
 
 #elix_sum
 boxplot(final_data$elix_sum) # some outliers
 cuttoff_elix <- quantile(final_data$elix_sum, 0.75) + 3*IQR(final_data$elix_sum)
 cuttoff_elix
-final_data <- final_data %>% filter(elix_sum <= cuttoff_elix)
+#final_data <- final_data %>% filter(elix_sum <= cuttoff_elix)
 
 #ndistinctATClevel2
 boxplot(final_data$ndistinctATClevel2) # some outliers
 cutoff_ndistinctATClevel2 <- quantile(final_data$ndistinctATClevel2, 0.75) + 3*IQR(final_data$ndistinctATClevel2)
 cutoff_ndistinctATClevel2
-final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
+#final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
 
 #QWT_count_before_INPAT
 boxplot(final_data$QWT_count_before_INPAT)
 cutoff_QWT_count_before_INPAT <- quantile(final_data$QWT_count_before_INPAT, 0.75) + 3*IQR(final_data$QWT_count_before_INPAT)
 cutoff_QWT_count_before_INPAT
+```
+
+## Standardizing variables
+
+Convert variables which do not have a meaningful zero point to z-scores (i.e. mean = 0, sd = 1). Coefficients are then interpreted as the change in the log odds of the outcome for a one standard deviation change in the predictor and the intercept is the log odds of the outcome when all predictors are zero (= in case of standardized variables, the mean of the variable).
+
+# not up to date: elix_sum, ndistinctATClevel2, QWT_count_before_INPAT, REHA_count_before_INPAT are not standardized, as they do have a meaningful zero point.
+
+```{r standardize}  
+#age
+final_data$age_std <- scale(final_data$age, center = TRUE, scale = TRUE)
+
+#inpat_id
+final_data$inpat_id_std <- scale(final_data$inpat_id, center = TRUE, scale = TRUE)
+
+#n.days
+final_data$n.days_std <- scale(final_data$n.days, center = TRUE, scale = TRUE)
+
+#elix_sum
+final_data$elix_sum_std <- scale(final_data$elix_sum, center = TRUE, scale = TRUE)
+
+#QWT_count_before_INPAT
+final_data$QWT_count_before_INPAT_std <- scale(final_data$QWT_count_before_INPAT, center = TRUE, scale = TRUE)
+
+#REHA_count_before_INPAT
+final_data$REHA_count_before_INPAT_std <- scale(final_data$REHA_count_before_INPAT, center = TRUE, scale = TRUE)
+
+#ndistinctATClevel2
+final_data$ndistinctATClevel2_std <- scale(final_data$ndistinctATClevel2, center = TRUE, scale = TRUE)
+
+#char_sum
+final_data$char_sum_std <- scale(final_data$char_sum, center = TRUE, scale = TRUE)
+```
 
 
+## Multicollinearity
 
-# check for multicollinearity
-
-vif_model <- glm(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT, family = "binomial", data = final_data)
+```{r multicollinearity}
+vif_model <- glm(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std, family = "binomial", data = final_data)
 
 car::vif(vif_model) #no multicollinearity
+
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 
-
-
+#correlation matrix
+#raq_poly <- psych::polychoric(items)
+#raq_cor <- raq_poly$rho
+#round(raq_cor, 2)
+#psych::cor.plot(raq_cor, upper = FALSE)
 
 ```
 
@@ -786,63 +856,64 @@ summary(model2)
 add_model_summary(model2, "Model 2")
 
 
-model3 <- glmmTMB(unpl_drop ~ sex + age + (1|pragmaid), family = "binomial", data = final_data)
+model3 <- glmmTMB(unpl_drop ~ sex + age_std + (1|pragmaid), family = "binomial", data = final_data)
 summary(model3)
 add_model_summary(model3, "Model 3")
 
-model4 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + (1|pragmaid), family = "binomial", data = final_data)
+model4 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + (1|pragmaid), family = "binomial", data = final_data)
 summary(model4) # Modell 4 bietet keinen Vorteil gegenüber Modell 3 -> INPAT ID rauslassen?
 add_model_summary(model4, "Model 4")
 
-model5 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + (1|pragmaid), family = "binomial", data = final_data)
+model5 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + (1|pragmaid), family = "binomial", data = final_data)
 summary(model5) # Modell 5 bietet keinen Vorteil gegenüber Modell 3 (außer leicht niedrigerer deviance)
 add_model_summary(model5, "Model 5")
 
 
-model6 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
+model6 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
 summary(model6) # Model 6 hat besseres AIC und deviance als Modell 3, aber schlechteres BIC
 add_model_summary(model6, "Model 6")
 
-model7 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + (1|pragmaid), family = "binomial", data = final_data)
+model7 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + (1|pragmaid), family = "binomial", data = final_data)
 summary(model7)
 add_model_summary(model7, "Model 7")
 
 
 # ist char_sum ein besserer Prädiktor?
-model8 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + char_sum + (1|pragmaid), family = "binomial", data = final_data)
+model8 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + char_sum_std + (1|pragmaid), family = "binomial", data = final_data)
 summary(model8)
-add_model_summary(model8, "Model 8") # char_sum passt schlechter als elix_sum, ist aber auch signifikant
+add_model_summary(model8, "Model 8") # char_sum passt schlechter als elix_sum_std, ist aber auch signifikant
 
-model9 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
+model9 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
 summary(model9)
 add_model_summary(model9, "Model 9") # keine Verbesserung gegenüber Modell 8
 
-model10 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + (1|pragmaid), family = "binomial", data = final_data)
+model10 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + (1|pragmaid), family = "binomial", data = final_data)
 summary(model10)
 add_model_summary(model10, "Model 10") 
 
-model11 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + (1|pragmaid), family = "binomial", data = final_data)
+model11 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + (1|pragmaid), family = "binomial", data = final_data)
 summary(model11)
 add_model_summary(model11, "Model 11") 
 
 
-model12 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + (1|pragmaid), family = "binomial", data = final_data)
+model12 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + (1|pragmaid), family = "binomial", data = final_data)
 summary(model12)
 add_model_summary(model12, "Model 12") 
 
-model13 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von REHA_count_before_INPAT ist nicht signifikant und verschlechtert model fit (auch wenn Reihenfolge umgekehr, dh wenn erst REHA count und dann QWT count aufgenommen wird)
+model13 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von REHA_count_before_INPAT_std ist nicht signifikant und verschlechtert model fit (auch wenn Reihenfolge umgekehr, dh wenn erst REHA count und dann QWT count aufgenommen wird)
 summary(model13)
 add_model_summary(model13, "Model 13") 
 
-model14 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist signifikant
+model14 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age_std verbessert AIC und LogLik leicht, Interaktion ist signifikant
 summary(model14)
 add_model_summary(model14, "Model 14") 
 
-model15 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*sex + (1|pragmaid), family = "binomial", data = final_data)
+model15 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + inpat_id_std*sex + (1|pragmaid), family = "binomial", data = final_data) 
+#Interaktion inpat_id_std*sex ist nicht signifikant
 
 summary(model15)
 add_model_summary(model15, "Model 15") 
-#Ist Modelverbesserung signifikant durch Hinzunahme von inpat_id*sex?
+#Ist Modelverbesserung signifikant durch Hinzunahme von inpat_id_std*sex?
 d14 <- as.numeric(-2*logLik(model14)) #is the -2LL for mod0
 d15 <- as.numeric(-2*logLik(model15)) #is the -2LL for mod2
 ldif <- d14 - d15 #is the -2LL difference
@@ -854,16 +925,17 @@ pchisq(ldif, degfr, lower.tail = FALSE) #.13
 Anova(model12)
 Anova(model12,type="III") # to do: set sum-to-zero contrasts on factors and center numerical covariates
 
-model16 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + inpat_id*elix_sum + (1|pragmaid), family = "binomial", data = final_data) summary(model16) #Hinzunahme von Interaktion inpat_id*elix*sum verbessert modelfit nicht
+model16 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + inpat_id_std*elix_sum_std + (1|pragmaid), family = "binomial", data = final_data)
+summary(model16) #Hinzunahme von Interaktion inpat_id_std*elix*sum verbessert modelfit nicht
 add_model_summary(model16, "Model 16") 
 
 
-model17 <- glmmTMB(unpl_drop ~ sex + age + inpat_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + treat_dur_cat + QWT_count_before_INPAT + REHA_count_before_INPAT + inpat_id*age + sex*age + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age verbessert AIC und LogLik leicht, Interaktion ist signifikant
-summary(model17) #Hinzunahme von Interaktion sex*age verbessert modelfit nicht
+model17 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + sex*age_std + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id_std*age_std verbessert AIC und LogLik leicht, Interaktion ist signifikant
+summary(model17) #Hinzunahme von Interaktion sex*age_std verbessert modelfit nicht
 add_model_summary(model17, "Model 17") 
 
 
-#Interpretation: Bei einer geringen Anzahl von Behandlungen (niedrige inpat_id) nimmt die Wahrscheinlichkeit eines Abbruchs stärker mit dem Alter ab. Bei einer höheren Anzahl von Behandlungen ist der Einfluss des Alters weniger stark.
+#Interpretation: Bei einer geringen Anzahl von Behandlungen (niedrige inpat_id_std) nimmt die Wahrscheinlichkeit eines Abbruchs stärker mit dem Alter ab. Bei einer höheren Anzahl von Behandlungen ist der Einfluss des Alters weniger stark.
 
 #find the best fitting model
 choose_best_model <- function(summary_df, criterion) {
@@ -880,9 +952,9 @@ choose_best_model <- function(summary_df, criterion) {
   return(best_model_row)
 }
 
-choose_best_model(model_summaries, "BIC") #Model 1 (Intercept) hat den besten fit
-choose_best_model(model_summaries, "AIC") #Model 8 hat den besten fit
-choose_best_model(model_summaries, "LogLik") #Model 11 hat den besten fit
+choose_best_model(model_summaries, "BIC") 
+choose_best_model(model_summaries, "AIC") 
+choose_best_model(model_summaries, "LogLik") 
 
 ```
 
@@ -892,51 +964,28 @@ choose_best_model(model_summaries, "LogLik") #Model 11 hat den besten fit
 # Predicted probabilities
 # Erstelle ein neues Datenset, durch das die interessierenden Variablen variiert werden
 
-coefffix_plot <- sjPlot::plot_model(model13, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+coefffix_plot <- sjPlot::plot_model(model14, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
 
-plot(ggpredict(model14, terms = c("age", "inpat_id")))
+plot(ggpredict(model14, terms = c("age_std", "inpat_id_std")))
 
-graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_inpat.png"), width=7, height=5)
+#graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_inpat.png"), width=7, height=5)
 
 #effekte der prädiktoren unter konstanthaltung aller anderen prädiktoren
 ae <- allEffects(model14)
 plot(ae)
 
-plot(ae["age:inpat_id"])
+plot(ae["age_std:inpat_id_std"])
 plot(ae["sex"])
-plot(ae["elix_sum"])
+plot(ae["elix_sum_std"])
 plot(ae["treat_dur_cat"])
-plot(ae["REHA_count_before_INPAT"])
+plot(ae["REHA_count_before_INPAT_std"])
 ```
-
-# Unterschiede zu QWT Modellen:
-
--   Wahrscheinlichkeit für 21+ Tage steigt mit steigendem Alter (QWT Modell: sinkt, 7-20 steigt bei beiden treatments)
--   Männer haben eine höhere Wahrscheinlichkeit für längere Aufenthlate (QWT Modell: Frauen), ist aber n.s.
--   Effekt von Komorbidität hat zwar die gleiche Richtung, aber ist deutlicher stärker für INPAT 21+ Tage (höhere Wahrscheinlichkeit für längere Aufenthalte)
--   Effekt von IMPAT_ID ist in QWT Modell stärker, Richtung ist gleich (höhere ID, niedrigere Wahrscheinlichkeit für 21+ Tage Aufenthalte)
-
-# Gemeinsamkeiten zu QWT Modellen:
-
--   Effekt Alter(positiv)
--   Effekt von Komorbidität (positiv) - jedoch char bei QWT vs. elix bei INPAT
--   Effekt von treatment_ID (negativ)
--   Effekt von Beschäftigung (positiv) - beschäftigt = längere Aufenthalte
-
-# Interpretation der festen Effekte (Refernzgruppe 1-6 Tage)
-
--   kein signifikanter Effekt von Geschlecht
--   signifikant positiver Koeffizienten für Alter -\> mit steigendem Alter steigt die Wahrscheinlichkeit für Behandlungen von 7-20 Tagen und 21+ Tagen im Vergleich zu 1-6 Tagen
--   signifikant negativer Koeffizient für inpat_ID -\> mit fortlaufenderID sinkt die Wahrscheinlichkeit für Behandlungen 21+ Tagen (7-20 Tage n.s.)
--   signifikant negative Koeffizient für retired (Ref. employed) -\> Personen in Rente haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt, sowohl vergleichen mit 7-20 Tagen als auch vergleichen mit 21+ Tagen
--   signifikant negative Koeffizient für unemployed (Ref. employed) -\> Unbeschäftigte haben eine erhöhte Wahrscheinlichkeit für einen nur 1-6 tägigen Aufenthalt vergleichen mit 21+ Tagen (7-20 Tage n.s.)
--   signifikant positiver Koeffizient für elix_sum -\> je höher der Elixhauser Score, desto höher die Wahrscheinlichkeit für einen längeren Aufenthalt (7-20 und 21+ Tage)
 
 # model checking and diagnostics
 
 ```{r residuals}
 
-model_simres <- simulateResiduals(model12)
+model_simres <- simulateResiduals(model14)
 plot(model_simres)
 ```
 Keine signifikante Abweichung in der Verteilung der Residuen (p-Wert des KS-Tests > 0.05).
@@ -1066,4 +1115,21 @@ choose_best_model(model_summaries, "AIC") #Model 8 hat den besten fit
 choose_best_model(model_summaries, "Deviance") #Model 11 hat den besten fit
 
 ``` 
+### Behandlungsdauer als AV
+
+```{r create vars}
+#qwt_inpat <- qwt_inpat %>%
+#  mutate(treat_dur_cat = factor(case_when(
+#  #more than or 21 days in treatment
+#  n.days >= 21 ~ 3,
+#  #between 7 and 20 days (inclusive)
+#  n.days >= 7 & n.days < 21 ~ 2,
+#  #between 0 and 6 days (inclusive)
+#  n.days >= 0 & n.days < 7 ~ 1,
+#  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
+
+#check distribution
+#ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
+
+```
 
