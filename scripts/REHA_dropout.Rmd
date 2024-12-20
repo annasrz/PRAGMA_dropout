@@ -11,7 +11,7 @@ output:
 - ....
 
 
-REHA kann sowohl in stationärer als auch in ambulanter Form durchgeführt werden, und sowohl über die GVK als auch DRV laufen. REHA dauert in der Regel mehrere Monate, kann aber auch bis zu einem Jahr dauern. Die GKV Daten werden hier nicht berücksichtigt, weil die Mehrheit der Rehas von der DRV durchgeführt wird, und somit Inkonsistenzen zischen den Datensets umgangen werden können.
+REHA kann sowohl in stationärer als auch in ambulanter Form durchgeführt werden, und sowohl über die GVK als auch DRV laufen. REHA dauert in der Regel mehrere Monate, kann aber auch bis zu einem Jahr dauern. Die GKV Daten werden hier nicht berücksichtigt, weil die Mehrheit der Rehas von der DRV durchgeführt wird, und somit Inkonsistenzen in Variablen (nicht alle Variablen aus GKV Daten sind auch in DRV Daten enthalten und vice versa) zwischen den Datensets umgangen werden können.
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -58,29 +58,74 @@ datapath <- file.path("..", "input")
 #read in all files in datapath 
 filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 
+names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "drvreha")
+
+if (length(filenames) != length(names)) {
+  stop("Die Anzahl der Dateien stimmt nicht mit Anzahl names überein.")
+}
+
 #save all files as separate dataframes
 ldf <- lapply(filenames, readRDS)
-names(ldf) <- gsub(".rds", "", basename(filenames))
+names(ldf) <- names[1:length(ldf)]
 print(names(ldf))
-names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "drvreha")
-names(ldf) <- names
-#check if all dataframes are loaded
-ls()
-list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
-rm(ldf)
+list2env(ldf, envir = .GlobalEnv) 
 ```
 # Daten vorbereiten
+
+## Daten Struktur
+```{r data_structure}
+#convert pragmaid to factor in all dataframes
+# harmonise column names
+
+
+ldf <- lapply(names(ldf), function(df_name) {
+  df <- ldf[[df_name]]
+  
+  # pragmaid in Faktor umwandeln, falls vorhanden
+  if ("pragmaid" %in% colnames(df)) {
+    df <- df %>%
+      mutate(pragmaid = as.factor(pragmaid))
+  }
+  
+  if (df_name %in% c("drvreha", "reha", "inpat", "qwt")) {
+    
+    date_columns <- grep("^date\\.(inpat|qwt|drvreha|reha)\\.(start|end)$", colnames(df), value = TRUE)
+    
+    # Wenn solche Spalten existieren, benenne sie um
+    if (length(date_columns) > 0) {
+      # Ersetze "date.[irgendwas]" durch "date.treat"
+      new_names <- gsub("^date\\..*\\.", "date.treat.", date_columns)
+      df <- df %>%
+        rename_with(~ new_names, all_of(date_columns))
+      
+      treatment_types <- gsub("^date\\.(.*)\\..*$", "\\1", date_columns)  # Extrahiere den Mittelteil
+      unique_treatments <- unique(treatment_types)
+      print(treatment_types)
+      df <- df %>%
+        mutate(treatment = factor(unique_treatments[1]))  # Füge die Spalte treatment hinzu
+    }
+  }
+  
+  return(df)
+})
+
+# Überprüfen der Struktur von ldf, um sicherzustellen, dass die Namen korrekt sind
+str(ldf)
+names(ldf) <- names[1:length(ldf)]
+
+list2env(ldf, envir = .GlobalEnv)
+```
 
 ## Daten auf Fälle reduzieren, die sich auch in den GKV Daten finden
 
 ```{r filtering}
 #ALLE reha perioden müssen GKV versichert gewesen sein!
 reha_filtered <- drvreha %>%
-  filter(date.drvreha.start >= as.Date("2015-12-01")) %>%
+  filter(date.treat.start >= as.Date("2015-12-01")) %>%
   filter(pragmaid %in% insurance_periods$pragmaid) %>%
   left_join(insurance_periods, by = c("pragmaid", "sex", "yob")) %>%
-  mutate(overlap = date.drvreha.start >= date.ins.start & date.drvreha.start <= date.ins.end) %>%
-  group_by(pragmaid, date.drvreha.start) %>%
+  mutate(overlap = date.treat.start >= date.ins.start & date.treat.start <= date.ins.end) %>%
+  group_by(pragmaid, date.treat.start) %>%
   summarise(has_overlap = any(overlap), .groups = 'drop') %>% 
   group_by(pragmaid) %>%
   filter(all(has_overlap)) %>%
@@ -88,19 +133,123 @@ reha_filtered <- drvreha %>%
 
 drvreha_gkvinsured <- drvreha %>%
   filter(pragmaid %in% reha_filtered$pragmaid) %>%
-  filter(date.drvreha.start >= as.Date("2015-12-01"))
+  filter(date.treat.start >= as.Date("2015-12-01"))
 
 #Fallzahl
 nrow(distinct(drvreha_gkvinsured, pragmaid)) # 550
 nrow(drvreha_gkvinsured)
 ```
+# Check Zeiträume
+
+## Direkte Anschlüsse identifizieren
+```{r check_immconsec}
+
+## DIREKTE ANSCHLÜSSE
+#wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
+
+drvreha_gkvinsured <- drvreha_gkvinsured %>%
+  arrange(pragmaid, date.treat.start) %>%
+  group_by(pragmaid) %>%
+  mutate(
+    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+
+table(drvreha_gkvinsured$direkter_anschluss, useNA = "always") #83
+
+#check -> okay
+drvreha_gkvinsured %>% arrange(pragmaid, date.treat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.treat.start, date.treat.end, MASSN_ART, ENTLASSFORM)
+```
+
+## Optional: direkte anschlüsse zu einem treatment zusammenfassen
+```{r combine_consectreatments}
+drvreha_gkvinsured <- drvreha_gkvinsured %>% 
+  group_by(pragmaid) %>%
+  arrange(date.treat.start) %>%
+  mutate(
+    date.treat.start = case_when(
+      direkter_anschluss ~ lag(date.treat.start),
+      TRUE ~ date.treat.start
+    )
+  ) %>%
+  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
+  ungroup()
+```
+
+
+## any OVERLAPS between treatments within pragmaid?
+
+```{r check_overlaps}
+drvreha_gkvinsured$overlap <- FALSE
+
+drvreha_gkvinsured <- drvreha_gkvinsured %>%
+  group_by(pragmaid) %>%
+  mutate(overlap = sapply(1:n(), function(i) {
+    any(date.treat.start[i] < date.treat.end[-i] & date.treat.end[i] > date.treat.start[-i])
+  }))
+
+table(drvreha_gkvinsured$overlap, useNA = "always") #2 cases with overlap
+overlapping_IDs <- drvreha_gkvinsured %>% filter(overlap == TRUE) %>% pull(pragmaid) %>% unique()
+
+# Plot erstellen, um Überlappungen zu visualisieren
+ggplot(drvreha_gkvinsured %>% filter(pragmaid %in% overlapping_IDs), 
+       aes(y = pragmaid)) +
+  geom_segment(aes(x = date.treat.start, 
+                   xend = date.treat.end, 
+                   yend = pragmaid, 
+                   alpha = as.factor(overlap)),
+               linewidth = 5) +
+  scale_alpha_manual(values = c(`FALSE` = 0.2, `TRUE` = 0.6)) +
+  labs(x = "Date", y = "Pragma ID") +
+  theme_minimal() #some overlaps are not visible, as they are very short (1 day)
+``` 
+## DO NOT RUN
+## Optional: remove overlapping treatments
+```{r remove_overlaps}
+#n.days berechnen
+#drvreha_gkvinsured$n.days <- as.integer(difftime(as.Date(drvreha_gkvinsured$date.treat.end), as.Date(drvreha_gkvinsured$date.treat.start), units = "days")) + 1
+
+# remove overlapping treatments -> keep only the longest treatment
+#cases_to_remove <- drvreha_gkvinsured %>% 
+#  filter(overlap == TRUE) %>%
+#  group_by(pragmaid) %>%
+#  arrange(pragmaid, date.treat.start) %>%
+#  mutate(group_overlap = cumsum(
+#      coalesce(
+#        as.logical(date.treat.start > lag(date.treat.end, n = 1, default = first(date.treat.start)) &
+#                   date.treat.start > lag(date.treat.end, n = 2, default = first(date.treat.start)) &
+#                   date.treat.start > lag(date.treat.end, n = 3, default = first(date.treat.start))
+#        ), TRUE 
+#      ))) %>%
+#  group_by(pragmaid, group_overlap) %>%
+#  mutate(
+#    max_n_days = max(n.days),  # Maximalwert pro Gruppe berechnen
+#    keep = case_when(
+#      n.days == max_n_days & row_number() == which.max(n.days) ~ TRUE,  # Behalte die erste Zeile mit max_n_days
+#      n.days == max_n_days ~ FALSE,                                   # Andere mit max_n_days auf FALSE setzen
+#      TRUE ~ FALSE                                                    # Kleinere Werte ebenfalls auf FALSE
+#    )
+#  ) 
+  
+#cases_to_remove %>% arrange(pragmaid, date.treat.start) %>% select(pragmaid, date.treat.start, date.treat.end, overlap, group_overlap, keep, n.days, MASSN_ART, ENTLASSFORM)
+
+#common columns in cases_to_remove and qwt
+#common_cols <- intersect(names(cases_to_remove), names(drvreha_gkvinsured))
+
+#sum(cases_to_remove$keep == FALSE)
+
+#qwt: remove cases with keep == "remove" in cases_to_remove
+#drvreha_gkvinsured <- drvreha_gkvinsured %>% 
+#  left_join(cases_to_remove, by = common_cols) %>%
+#  filter(is.na(keep) | keep == TRUE) %>%
+ # select(-c(overlap, group_overlap, keep, direkter_anschluss))
+
+```
+
 
 ## Outcome Variablen Definition? 
 
-### Behandlungsdauer als AV
+### ENTLASSFORM und alternativ Behandlungsdauer als AV
 ```{r rehaduration}
-drvreha_gkvinsured$n.days <- as.integer(difftime(as.Date(drvreha_gkvinsured$date.drvreha.end), as.Date(drvreha_gkvinsured$date.drvreha.start), units = "days")) + 1
-head(reha)
+drvreha_gkvinsured$n.days <- as.integer(difftime(as.Date(drvreha_gkvinsured$date.treat.end), as.Date(drvreha_gkvinsured$date.treat.start), units = "days")) + 1
 
 summary(drvreha_gkvinsured$n.days)
 
@@ -110,6 +259,7 @@ ggplot(drvreha_gkvinsured, aes(x = MASSN_ART, fill = ENTLASSFORM)) +
   #rotate x axis labels
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
 
+table(drvreha_gkvinsured$ENTLASSFORM, useNA = "ifany")
 
 drvreha_gkvinsured <- drvreha_gkvinsured %>% 
   filter(ENTLASSFORM != "verstorben") %>%
@@ -149,24 +299,25 @@ ggplot(drvreha_gkvinsured, aes(x = MASSN_ART, fill = unpl_drop)) +
 ```{r check_id}
 drvreha_gkvinsured <- drvreha_gkvinsured %>% 
   group_by(pragmaid) %>%
-  arrange(date.drvreha.start) %>%
-  mutate(reha_id = row_number())
+  arrange(date.treat.start) %>%
+  mutate(reha_id = row_number()-1)
 
 table(drvreha_gkvinsured$reha_id)
 ```
 ## ALTER
 ```{r age}
 drvreha_gkvinsured <- drvreha_gkvinsured %>%
-  mutate(age = as.integer(substr(date.drvreha.start, 1, 4)) - yob)
+  mutate(age = as.integer(substr(date.treat.start, 1, 4)) - yob)
 
 ```
+
 ## Hinzufügen Emplyoment Status
 
 ```{r add_employment}
 employ_unfiltered <- left_join(drvreha_gkvinsured, employment, by = "pragmaid")
 
 reha_employ <- employ_unfiltered %>%
-  filter(date.drvreha.start >= date.emp.start & date.drvreha.start <= date.emp.end) #emp.type und EWERB_VANTRAG entsprechen sich nicht immer, daher wird der Konsistenz mit den anderen Datasets nur emp.type vernwendet
+  filter(date.treat.start >= date.emp.start & date.treat.start <= date.emp.end) #emp.type und EWERB_VANTRAG entsprechen sich nicht immer, daher wird der Konsistenz mit den anderen Datasets nur emp.type vernwendet
 
 missing_rows <- drvreha_gkvinsured %>%
   anti_join(reha_employ, by = c("pragmaid", "reha_id")) 
@@ -207,7 +358,7 @@ nrow(distinct(diagnoses_reha_employ_alltimes, pragmaid, reha_id)) #756 -> okay
 diagnoses_reha_employ_fil <- diagnoses_reha_employ_alltimes %>%
   filter(
     #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
-     date.diag.start >= (date.drvreha.start - days(180)) & date.diag.start <= date.drvreha.start)
+     date.diag.start >= (date.treat.start - days(180)) & date.diag.start <= date.treat.start)
 #Arbeitsdefinition, evtl für stationäre Diagnosen (bzw. alle anderen settings) Eingrenzung anpassen?
 
 diagnoses_reha_employ_fil %>% filter(gkv.x != gkv.y) #0 rows
@@ -277,9 +428,10 @@ fost_diagnoses_reha_employ_alltimes <- left_join(diagnoses_reha_employ, fost_reh
 
 
 fost_diagnoses_reha_employ_fil <- fost_diagnoses_reha_employ_alltimes %>%
-  filter((date.drvreha.start >= date.fost.start & is.na(date.fost.end)) | (date.drvreha.start >= date.fost.start & date.drvreha.start <= date.fost.end))
+  filter((date.treat.start >= date.fost.start & is.na(date.fost.end)) | (date.treat.start >= date.fost.start & date.treat.start <= date.fost.end))
 
 nrow(distinct(fost_diagnoses_reha_employ_fil, pragmaid)) # 6 patients do have a pflegegrad/stufe during the beginning of the reha treatment - as this is not much fosterage will be ignored. 
+
 
 ```
 ## Hinzufügen von Medikation
@@ -295,7 +447,7 @@ nrow(distinct(med_diagnoses_reha_employ_alltimes, pragmaid)) # 550-> okay
 
 med_diagnoses_reha_employ_fil <- med_diagnoses_reha_employ_alltimes %>%
   # only keep medication data that happend during the 3 months before the rehaient treatment
-  filter(date.medi.disp >= (date.drvreha.start - days(30)) & date.medi.disp <= date.drvreha.start) %>%
+  filter(date.medi.disp >= (date.treat.start - days(30)) & date.medi.disp <= date.treat.start) %>%
   filter(ATC != "")
 
 nrow(distinct(med_diagnoses_reha_employ_fil, id_pragma_reha)) # 285 reha treatments have medication data in the timeframe of interest
@@ -343,32 +495,21 @@ summary(med_diagnoses_reha_employ$ndistinctATClevel2)
 hist(med_diagnoses_reha_employ$ndistinctATClevel2)
 
 ```
+
 ## Hinzufügen von QWT ID (wie viele QWTs hat eine Person zum Zeitpunkt der REHA bereits gemacht?)
 
 ```{r qwt count}
 
 #Daten zusammenführen
 
-med_diagnoses_reha_employ$treatment <- "reha"
-qwt$treatment <- "qwt"
-
-#rename 
-qwt <- qwt %>% rename(date.treat.start = date.qwt.start, date.treat.end = date.qwt.end)
-med_diagnoses_reha_employ <- med_diagnoses_reha_employ %>% rename(date.treat.start = date.drvreha.start, date.treat.end = date.drvreha.end)
-
-colnames <- c("date.treat.start", "date.treat.end", "treatment", "pragmaid")
-
-#are colnames in qwt and reha? 
-all(colnames %in% colnames(qwt))
-
 med_diagnoses_reha_employ_qwt <- bind_rows(
-  med_diagnoses_reha_employ, qwt %>% select(all_of(colnames)))
+  med_diagnoses_reha_employ, qwt %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
 med_diagnoses_reha_employ_qwt <- med_diagnoses_reha_employ_qwt %>%
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
   mutate(QWT_count_before_reha = sapply(1:n(), function(i) {
-    if (treatment[i] == "reha") {
+    if (treatment[i] == "drvreha") {
       sum(treatment[1:(i-1)] == "qwt" & date.treat.end[1:(i-1)] < date.treat.start[i])
     } else {
       NA
@@ -378,7 +519,7 @@ med_diagnoses_reha_employ_qwt <- med_diagnoses_reha_employ_qwt %>%
 #check
 med_diagnoses_reha_employ_qwt %>% select(pragmaid, date.treat.start, reha_id, treatment, QWT_count_before_reha) %>% arrange(pragmaid, date.treat.start) #okay
 
-med_diagnoses_reha_employ_qwt <- med_diagnoses_reha_employ_qwt %>% filter(treatment == "reha")
+med_diagnoses_reha_employ_qwt <- med_diagnoses_reha_employ_qwt %>% filter(treatment == "drvreha")
 
 ```
 
@@ -386,23 +527,14 @@ med_diagnoses_reha_employ_qwt <- med_diagnoses_reha_employ_qwt %>% filter(treatm
 
 ```{r reha count}
 
-#Daten zusammenführen (reha und nicht reha_new Daten, da in den reha daten sowohl GKV als auch DRV vorhanden sind)
-inpat$treatment <- "inpat"
-
-#rename 
-inpat <- inpat %>% rename(date.treat.start = date.inpat.start, date.treat.end = date.inpat.end)
-
-#are colnames in qwt and reha? 
-all(colnames %in% colnames(inpat))
-
 med_diagnoses_reha_employ_qwt_inpat <- bind_rows(
-  med_diagnoses_reha_employ_qwt, inpat %>% select(all_of(colnames)))
+  med_diagnoses_reha_employ_qwt, inpat %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
 med_diagnoses_reha_employ_qwt_inpat <- med_diagnoses_reha_employ_qwt_inpat %>%
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
   mutate(INPAT_count_before_reha = sapply(1:n(), function(i) {
-    if (treatment[i] == "reha") {
+    if (treatment[i] == "drvreha") {
       sum(treatment[1:(i-1)] == "inpat" & date.treat.end[1:(i-1)] < date.treat.start[i])
     } else {
       NA
@@ -412,7 +544,7 @@ med_diagnoses_reha_employ_qwt_inpat <- med_diagnoses_reha_employ_qwt_inpat %>%
 #check
 med_diagnoses_reha_employ_qwt_inpat %>% select(pragmaid, date.treat.start, reha_id, treatment, QWT_count_before_reha, INPAT_count_before_reha) %>% arrange(pragmaid, date.treat.start) #okay
 
-med_diagnoses_reha_employ_qwt_inpat <- med_diagnoses_reha_employ_qwt_inpat %>% filter(treatment == "reha")
+med_diagnoses_reha_employ_qwt_inpat <- med_diagnoses_reha_employ_qwt_inpat %>% filter(treatment == "drvreha")
 
 ```
 
@@ -425,46 +557,76 @@ reha_final <- med_diagnoses_reha_employ_qwt_inpat  %>%
 
 ```
 
-# Standardizing variables
+# Centering variables
 
-Convert variables which do not have a meaningful zero point to z-scores (i.e. mean = 0, sd = 1). Coefficients are then interpreted as the change in the log odds of the outcome for a one standard deviation change in the predictor and the intercept is the log odds of the outcome when all predictors are zero (= in case of standardized variables, the mean of the variable).
+Center all continuous variables (i.e., subtract the mean, so the mean = 0). The coefficients are then interpreted as the change in the log odds of the outcome for a one-unit increase in the predictor, while holding all other predictors at their mean values. The intercept represents the log odds of the outcome when all predictors are at their mean values.
 
-# not up to date: elix_sum, ndistinctATClevel2, QWT_count_before_REHA, INPAT_count_before_REHA are not standardized, as they do have a meaningful zero point.
 
-```{r standardize}  
-#age
-reha_final$age_std <- scale(reha_final$age)
+```{r centering}  
 
-#reha_id
-reha_final$reha_id_std <- scale(reha_final$reha_id)
+variables_to_center <- c("age", "reha_id", "elix_sum", "ndistinctATClevel2", "QWT_count_before_reha", "INPAT_count_before_reha", "char_sum")
 
-#elix_sum
-reha_final$elix_sum_std <- scale(reha_final$elix_sum)
-
-#ndistinctATClevel2
-reha_final$ndistinctATClevel2_std <- scale(reha_final$ndistinctATClevel2)
-
-#QWT_count_before_REHA
-reha_final$QWT_count_before_REHA_std <- scale(reha_final$QWT_count_before_reha)
-
-#INPAT_count_before_REHA
-reha_final$INPAT_count_before_REHA_std <- scale(reha_final$INPAT_count_before_reha)
-
-#char_sum
-reha_final$char_sum_std <- scale(reha_final$char_sum)
-
-#n.days is a bit more complicated, as n.days should be standardized by MASSN_ART (as the treatment duration is different for different treatments)
-reha_final <- reha_final %>%
-  group_by(MASSN_ART) %>%
-  mutate(n.days_std = scale(n.days)) %>%
-  ungroup()
-
-#summary of n.days_std by MASSN_ART
-for (massn in unique(reha_final$MASSN_ART)) {
-  print(massn)
-  print(summary(reha_final$n.days_std[reha_final$MASSN_ART == massn]))
+#centering
+for (var in variables_to_center) {
+  reha_final[[paste0(var, "_cent")]] <- scale(reha_final[[var]], center = TRUE, scale = FALSE)
 }
 
+#new var: n.days_cat (three categories per MASSN_ART, that are evenly distributed within the MASSN_ART)
+reha_final <- reha_final %>%
+  group_by(MASSN_ART) %>%
+  mutate(n.days_cat = ntile(n.days, 3)) %>%
+  mutate(n.days_cat = factor(n.days_cat, levels = 1:3, labels = c("short", "medium", "long"))) %>%
+  ungroup()
+
+#untere grenzen
+n_days_bounds <- reha_final %>%
+  group_by(MASSN_ART) %>%
+  summarise(
+    Lower_Q1 = min(n.days, na.rm = TRUE), 
+    Lower_Q2 = quantile(n.days, 1/3, na.rm = TRUE),
+    Lower_Q3 = quantile(n.days, 2/3, na.rm = TRUE)  
+  ) %>%
+  ungroup()
+
+print(n_days_bounds)
+
+table(reha_final$n.days_cat, reha_final$MASSN_ART)
+
+
+#n.days_cent within MASSN_ART
+reha_final <- reha_final %>%
+  group_by(MASSN_ART) %>%
+  mutate(n.days_cent = scale(n.days, center = TRUE, scale = TRUE)) %>%
+  ungroup()
+
+```
+
+# Intercorrelation of (numeric) predictors/outcome
+
+```{r correlation}
+# correlation matrix
+cor_matrix <-  cor(reha_final %>% select(c("age", "reha_id", "elix_sum", "ndistinctATClevel2", "QWT_count_before_reha", "INPAT_count_before_reha", "char_sum", "n.days_cent")))
+
+cor_melted <- melt(cor_matrix)
+
+# plot as Heatmap
+ggplot(cor_melted, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  geom_text(aes(label = round(value, 2)), vjust = 1) +
+  theme_minimal() +
+  labs(x = "", y = "", title = "Correlation Heatmap") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# correlation of treatment duration and unplanned dropouts
+reha_final$unpl_drop_numeric <- as.numeric(reha_final$unpl_drop) - 1
+reha_final$n.days_cat_numeric <- as.numeric(reha_final$n.days_cat)
+
+cor.test(reha_final$n.days_cent, reha_final$unpl_drop_numeric, method = "spearman") # rho: -.51
+cor(reha_final$n.days_cat_numeric, reha_final$unpl_drop_numeric, method = "pearson") #-.47
+
+#remove unpl_drop_numeric and n.days_cat_numeric
+reha_final <- reha_final %>% select(-c(unpl_drop_numeric, n.days_cat_numeric))
 ```
 
 # Speicherplatz freigeben
@@ -496,17 +658,17 @@ reha_final <- reha_final %>%
          emp.type = fct_recode(emp.type, "other" = "retired"))  # Ersetzen des Faktors
 
 #reha_id_std
-boxplot(reha_final$reha_id) # looks okay
-cutoff_rehaid <- quantile(reha_final$reha_id, 0.75) + 3*IQR(reha_final$reha_id) 
+boxplot(reha_final$reha_id_cent) # looks okay
+cutoff_rehaid <- quantile(reha_final$reha_id_cent, 0.75) + 3*IQR(reha_final$reha_id_cent) 
 
 #elix_sum
-boxplot(reha_final$elix_sum) 
-cutoff_elixsum <- quantile(reha_final$elix_sum, 0.75) + 3*IQR(reha_final$elix_sum) #no values above cutoff
+boxplot(reha_final$elix_sum_cent) 
+cutoff_elixsum <- quantile(reha_final$elix_sum_cent, 0.75) + 3*IQR(reha_final$elix_sum_cent) #no values above cutoff
 
 #QWT_count_before_reha
-boxplot(reha_final$QWT_count_before_reha) #some outliers
-cutoff_QWTcount <- quantile(reha_final$QWT_count_before_reha, 0.75) + 3*IQR(reha_final$QWT_count_before_reha) # 4
-table(reha_final$QWT_count_before_reha)
+boxplot(reha_final$QWT_count_before_reha_cent) #some outliers
+cutoff_QWTcount <- quantile(reha_final$QWT_count_before_reha_cent, 0.75) + 3*IQR(reha_final$QWT_count_before_reha_cent) # 4
+table(reha_final$QWT_count_before_reha_cent)
 
 # Arbeitsentscheidung: zunächst keine outlier exkludieren, aber später influential cases anhand Hebelwerte etc checken 
 
@@ -518,12 +680,11 @@ reha_final <- reha_final %>% mutate(VERLAUF = factor(case_when(
  TRUE ~ NA_character_  
 ), levels = c("besser", "nicht besser")))
 
-vif_model <- glm(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + QWT_count_before_REHA_std + INPAT_count_before_REHA_std + n.days_std, data = reha_final, family = binomial)
+vif_model <- glm(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent, data = reha_final, family = binomial)
 
-vif_model_VERLAUF <- glm(VERLAUF ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + QWT_count_before_REHA_std + INPAT_count_before_REHA_std + n.days_std, data = reha_final, family = binomial)
 
 car::vif(vif_model)
-car::vif(vif_model_VERLAUF)
+#car::vif(vif_model_VERLAUF)
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 ```
 #Logistische Modelle
@@ -554,89 +715,134 @@ model1 <- glmmTMB(unpl_drop ~ 1 + (1|pragmaid), family = "binomial", data = reha
 summary(model1)
 add_model_summary(model1, "Intercept")
 
-modeltest <- glmmTMB(unpl_drop ~ n.days_std + (1|pragmaid), family = "binomial", data = reha_final) #very high coefficients -> due to complete separation?
+#modeltest <- glmmTMB(unpl_drop ~ n.days_std + (1|pragmaid), family = "binomial", data = reha_final) #very high coefficients -> due to complete separation?
 #check for complete separation
 #categorize n.days_std to have a look at the distribution
-reha_final$n.days_cat <- cut(reha_final$n.days_std, breaks = quantile(reha_final$n.days_std, probs = seq(0, 1, by = 0.25)), include.lowest = TRUE)
+#reha_final$n.days_cat <- cut(reha_final$n.days_std, breaks = quantile(reha_final$n.days_std, probs = seq(0, 1, by = 0.25)), include.lowest = TRUE)
 
-table(reha_final$n.days_cat, reha_final$unpl_drop)
+#table(reha_final$n.days_cat, reha_final$unpl_drop)
 
-ggplot(reha_final, aes(x = factor(unpl_drop), y = n.days_std)) +
-  geom_boxplot() +
-  labs(x = "unpl_drop", y = "n.days_std", title = "Verteilung von n.days_std nach unpl_drop") +
-  theme_minimal()
+#ggplot(reha_final, aes(x = factor(unpl_drop), y = n.days_std)) +
+#  geom_boxplot() +
+#  labs(x = "unpl_drop", y = "n.days_std", title = "Verteilung von n.days_std nach unpl_drop") +
+#  theme_minimal()
 
-ggplot(reha_final, aes(x = factor(unpl_drop), y = n.days)) +
-  geom_boxplot() +
-  facet_wrap(~MASSN_ART) +
-  labs(x = "unpl_drop", y = "n.days_std", title = "Verteilung von n.days (unstandardisiert) nach unpl_drop") +
-  theme_minimal()
+#ggplot(reha_final, aes(x = factor(unpl_drop), y = n.days)) +
+#  geom_boxplot() +
+#  facet_wrap(~MASSN_ART) +
+#  labs(x = "unpl_drop", y = "n.days_std", title = "Verteilung von n.days (unstandardisiert) nach unpl_drop") +
+#  theme_minimal()
 
 #(nearly?) complete separation in n.days_std -> is n.days_std the right variable to use? do we really need the treatment duration?
-
-modeltest1 <- glmmTMB(unpl_drop ~ n.days_std + n.days_std*MASSN_ART + (1|pragmaid), family = "binomial", data = reha_final)
-summary(modeltest1)
 
 model2 <- glmmTMB(unpl_drop ~ sex + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model2)
 add_model_summary(model2, "Model 2")
 
-model3 <- glmmTMB(unpl_drop ~ sex + age_std + (1|pragmaid), family = "binomial", data = reha_final)
+model3 <- glmmTMB(unpl_drop ~ sex + age_cent + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model3)
 add_model_summary(model3, "Model 3")
 
-model4 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + (1|pragmaid), family = "binomial", data = reha_final)
+model4 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model4)
 add_model_summary(model4, "Model 4")
 
-model5 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + (1|pragmaid), family = "binomial", data = reha_final)
+model5 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model5)
 add_model_summary(model5, "Model 5")
 
-model6 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + (1|pragmaid), family = "binomial", data = reha_final)
+model6 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model6) # Model 6 hat besseres AIC und deviance als Modell 3, aber schlechteres BIC
 add_model_summary(model6, "Model 6")
 
-model7.1 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + (1|pragmaid), family = "binomial", data = reha_final)
+model7.1 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model7.1)
 add_model_summary(model7.1, "Model 7.1")
 
-model7.2 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + char_sum_std + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
+model7.2 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + char_sum_cent + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
 summary(model7.2)
 add_model_summary(model7.2, "Model 7.2")
 
-model8 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
+model8 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
 summary(model8)
 add_model_summary(model8, "Model 8")
 
 
-model9 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
+model9 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + (1|pragmaid), family = "binomial", data = reha_final) #elix sum fits slightly better 
 summary(model9)
 add_model_summary(model9, "Model 9")
 
-model10 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + QWT_count_before_REHA_std + (1|pragmaid), family = "binomial", data = reha_final) 
+model10 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + (1|pragmaid), family = "binomial", data = reha_final) 
 summary(model10)
 add_model_summary(model10, "Model 10")
 
-model11 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + QWT_count_before_REHA_std + INPAT_count_before_REHA_std + (1|pragmaid), family = "binomial", data = reha_final) 
+model11 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + (1|pragmaid), family = "binomial", data = reha_final) 
 summary(model11)
 add_model_summary(model11, "Model 11")
 
-model12 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + QWT_count_before_REHA_std + INPAT_count_before_REHA_std + n.days_std + (1|pragmaid), family = "binomial", data = reha_final)
+model12 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model12)
 add_model_summary(model12, "Model 12")
+```
 
+# Interaktionen
+```{r interactions}
 
-model13 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + QWT_count_before_REHA_std + INPAT_count_before_REHA_std + n.days_std + age_std*reha_id_std + (1|pragmaid), family = 
+model13 <- glmmTMB(unpl_drop ~ sex + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + age_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
-summary(model13)
-add_model_summary(model13, "Model 13")
+summary(model13)# n.s.
+add_model_summary(model13, "Model 13") 
 
-model14 <- glmmTMB(unpl_drop ~ sex + age_std + reha_id_std + STAATS_ANGE + emp.type + elix_sum_std + ndistinctATClevel2_std + MASSN_ART + QWT_count_before_REHA_std + INPAT_count_before_REHA_std + n.days_std + age_std*reha_id_std + n.days_std*MASSN_ART +
-                     (1|pragmaid), family = "binomial", data = reha_final) 
-summary(model14)
+model14 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + sex*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final) 
+summary(model14) #n.s.
 add_model_summary(model14, "Model 14")
 
+model15 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + STAATS_ANGE*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final) 
+summary(model15) # knapp n.s.
+add_model_summary(model15, "Model 15")
+
+model16 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + emp.type*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final) 
+summary(model16) #n.s.
+add_model_summary(model16, "Model 16")
+
+model17 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + emp.type*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final) 
+summary(model17) #n.s.
+add_model_summary(model17, "Model 17")
+
+model18 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + elix_sum_cent*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final) 
+
+summary(model18) #n.s.
+add_model_summary(model18, "Model 18")
+
+model19 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + ndistinctATClevel2_cent*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final) 
+summary(model19) #knapp n.s.
+add_model_summary(model19, "Model 19")
+
+model20 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + MASSN_ART*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final)
+summary(model20) #n.s.
+add_model_summary(model20, "Model 20")
+
+model21 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + QWT_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final)
+summary(model21) #n.s.
+add_model_summary(model21, "Model 21")
+
+model22 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + INPAT_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final)
+summary(model22) #n.s.
+add_model_summary(model22, "Model 22")
+```
+
+# Model evaluation
+
+```{r model_evaluation}  
 
 #find the best fitting model
 choose_best_model <- function(summary_df, criterion) {
@@ -657,44 +863,209 @@ choose_best_model(model_summaries, "BIC") #Intercept
 choose_best_model(model_summaries, "AIC") #Model 10
 choose_best_model(model_summaries, "LogLik") #Model 11
 
+
+#plot model summaries as skree plot
+model_summaries_long <- model_summaries %>%
+  pivot_longer(cols = c(LogLik, AIC, BIC), names_to = "Criterion", values_to = "Value")
+
+#desired order of models: intercept, model 2, model 3, model 4, model 5, model 6, model 7, model 8, model 9, model 10, model 11, model 12, model 13, model 14, model 15, model 16, model 17
+model_summaries_long$Model <- factor(model_summaries_long$Model, levels = c("Intercept", "Model 2", "Model 3", "Model 4", "Model 5", "Model 6", "Model 7.1", "Model 7.2", "Model 8", "Model 9", "Model 10", "Model 11", "Model 12", "Model 13", "Model 14", "Model 15", "Model 16", "Model 17", "Model 18", "Model 19", "Model 20", "Model 21", "Model 22"))
+
+ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
+  geom_point(stat = "identity") +
+  geom_line(aes(group = Criterion)) +
+  facet_wrap(~Criterion, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Model Comparison",
+    x = "Model",
+    y = "Criterion Value"
+  )
 ```
+# Decide on best model 
+```{r best_model}
+best_model <- model12
+anova(model1, best_model, test = "Chisq") 
+```
+
+# Model diagnostics: ICC and R2
+```{r model_iccr2}
+#R2 = proportion of the explained variance (of the full model)
+performance::r2_nakagawa(best_model) #conditional R2: 20%, marginal R2: 10.5%
+
+# ICC = proportion of explained variance that can be attributed to the random effects
+residual_var <- pi^2 / 3
+random_effects_var <- VarCorr(best_model)$cond$pragmaid[1, 1]
+ICC <- random_effects_var / (random_effects_var + residual_var)
+print(ICC) #10.5
+performance::icc(best_model) #etwa 9.5% der outcomevarianz wird durch unterschiede in den gruppen (pragmaID) erklärt
+```
+## Odds Ratios of significant predictors
+```{r odds_ratios}
+# Odds Ratios
+coefficents <- summary(best_model)$coefficients$cond[, 1]
+se <- summary(best_model)$coefficients$cond[, 2]
+
+odds_ratios <- exp(coefficents) #odds ratios
+
+#95% confidence intervals
+ci_lower <- exp(coefficents - 1.96 * se)
+ci_upper <- exp(coefficents + 1.96 * se)
+
+#combine into a data frame
+odds_ratios_df <- data.frame(
+  Predictor = names(coefficents),
+  OR = odds_ratios,
+  CI_lower = ci_lower,
+  CI_upper = ci_upper,
+  p = summary(best_model)$coefficients$cond[, 4]
+)
+rownames(odds_ratios_df) <- NULL
+```
+
+
+# Fallzahlen und Stichprobenbeschreibung
+```{r sample_size}
+# wie viele patients?
+n_pat <- reha_final %>% distinct(pragmaid) %>% nrow()
+# wie viele Behandlungen?
+n_treats <- reha_final %>% nrow()
+
+print(n_pat)
+print(n_treats)
+
+#share dropouts
+prop.table(table(reha_final$unpl_drop))
+
+#AGE
+summary(reha_final$age)
+sd(reha_final$age)
+
+#SEX
+prop.table(table(reha_final$sex))
+
+#emp.type
+prop.table(table(reha_final$emp.type))
+
+#nationality
+prop.table(table(reha_final$STAATS_ANGE))
+
+#elix_sum
+summary(reha_final$elix_sum)
+
+#ndistinctATClevel2
+summary(reha_final$ndistinctATClevel2)
+
+#INPAT_count_before_reha
+summary(reha_final$INPAT_count_before_reha)
+
+#QWT_count_before_reha
+summary(reha_final$QWT_count_before_reha)
+
+#inpat_id
+summary(reha_final$reha_id)
+
+#MASSN_ART
+prop.table(table(reha_final$MASSN_ART))
+
+#anzahl distinkter pragmaIDs mit qwt_id > 0 / anzahl aller distinkter pragmaIDs = anteil der patienten mit mehr als einer reha
+(reha_final %>% filter(reha_id > 0) %>% distinct(pragmaid) %>% nrow()) / n_pat 
+#mehr als 2 reha
+(reha_final %>% filter(reha_id > 1) %>% distinct(pragmaid) %>% nrow()) / n_pat
+#mehr als 3 reha
+(reha_final %>% filter(reha_id > 2) %>% distinct(pragmaid) %>% nrow()) / n_pat
+#mehr als 4 reha
+(reha_final %>% filter(reha_id > 4) %>% distinct(pragmaid) %>% nrow()) / n_pat
+
+
+#average number of treatments per patient
+#REHA
+n_treats_reha <- reha_final %>% group_by(pragmaid) %>% summarise(n_treats = n()) %>% pull(n_treats)
+summary(n_treats_reha)
+
+#INPAT
+n_treats_inpat <- reha_final %>%
+  group_by(pragmaid) %>%
+  slice_max(INPAT_count_before_reha, with_ties = FALSE) %>% 
+  ungroup() %>%
+  pull(INPAT_count_before_reha)
+summary(n_treats_inpat)
+
+#QWT
+n_treats_qwt <- reha_final %>%
+  group_by(pragmaid) %>%
+  slice_max(QWT_count_before_reha, with_ties = FALSE) %>% 
+  ungroup() %>%
+  pull(QWT_count_before_reha)
+summary(n_treats_qwt)
+
+
+
+```
+
 
 # Plot results
 ```{r plot results}
-coefffix_plot <- sjPlot::plot_model(model14, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
+new_labels <- c(
+  "(Intercept)" = "Intercept", 
+  "age_cent" = "Alter",
+  "reha_id_cent" = "Behandlungserfahrung REHA",
+  "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
+  "STAATS_ANGEnicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht-deutsch)",
+  "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
+  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
+  "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
+  "elix_sum_cent" = "Elixhauser-Score",
+  "fost.degree_binja" = "Pflegestatus: vorhanden\n(Ref.: nicht vorhanden)",
+  "ndistinctATClevel2_cent" = "Anzahl Medikationen",
+  "INPAT_count_before_reha_cent" = "Behandlungserfahrung INPAT",
+  "QWT_count_before_reha_cent" = "Behandlungserfahrung QE",
+  "MASSN_ARTstationäre Maßnahme" = "Behandlungsart: stationär\n(Ref.: ambulant)",
+  "MASSN_ARTganztägig ambulante Maßnahme" = "Behandlungsart: ganztägig ambulant\n(Ref.: ambulant)"
+)
 
-graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_reha.png"), width=7, height=5)
 
-plot(ggpredict(modeltest, terms = c("n.days_std")))
-plot(ggpredict(model11, terms = c("age_std")))
-plot(ggpredict(model11, terms = c("STAATS_ANGE")))
+coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.2, 2), wrap.labels = 100)
 
-#effekte der prädiktoren unter konstanthaltung aller anderen prädiktoren
-ae <- allEffects(model11)
-plot(ae)
-plot(ae[["sex"]])
-plot(ae[["age_std"]]) #signifikant
-plot(ae[["reha_id_std"]])
-plot(ae[["STAATS_ANGE"]])
-plot(ae[["emp.type"]]) #signifikant
-plot(ae[["elix_sum_std"]])
-plot(ae[["ndistinctATClevel2_std"]])
-plot(ae[["MASSN_ART"]]) #signifikant
-plot(ae[["QWT_count_before_REHA_std"]])
-plot(ae[["INPAT_count_before_REHA_std"]])
+coefffix_plot <- coefffix_plot + 
+  #change size of axis labels
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 12))
+  
+coefffix_plot
+
+#save plot
+graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_REHA.png"), width=7.5, height=4.5)
+
+#plot(ggpredict(model13, terms = c("age_cent", "reha_id_cent")))
 
 ```
 # Model diagnostics
 ```{r residuals}
-model_simres <- simulateResiduals(modeltest)
+model_simres <- simulateResiduals(best_model)
 plot(model_simres)
 
 
 plotResiduals(model_simres, form = reha_final$MASSN_ART)
-plotResiduals(model_simres, form = reha_final$age_std)
-plotResiduals(model_simres, form = reha_final$reha_id_std)
+plotResiduals(model_simres, form = reha_final$age_cent)
+plotResiduals(model_simres, form = reha_final$reha_id_cent)
 plotResiduals(model_simres, form = reha_final$STAATS_ANGE)
 ```
+
+# Fallzahlen
+```{r sample_size}
+# wie viele patients?
+n_pat <- reha_final %>% distinct(pragmaid) %>% nrow()
+# wie viele Behandlungen?
+n_treats <- reha_final %>% nrow()
+
+print(n_pat)
+print(n_treats)
+
+#share dropouts
+prop.table(table(reha_final$unpl_drop))
+```
+
 
 # Sensitivitäsanalyse mit VERLAUF (gebessert, nicht gebessert)
 ```{r sensitivity analyses}
@@ -747,7 +1118,7 @@ reha <- left_join(reha, drvreha_specifics %>% select(c("hivid", "DIAG_VERAEND", 
 drv_reha_test <- drvreha_specifics %>% filter(BEWILLDIAG %like% "F10" | DIAG_GRUPPE %like% "Störungen durch Alkohol" | DIAG1 %like% "F10")
 
 str(drv_reha_test)
-drv_reha_test$n.days <- as.integer(difftime(as.Date(drv_reha_test$date.drvreha.end), as.Date(drv_reha_test$date.drvreha.start), units = "days")) + 1
+drv_reha_test$n.days <- as.integer(difftime(as.Date(drv_reha_test$date.treat.end), as.Date(drv_reha_test$date.treat.start), units = "days")) + 1
 
 summary(drv_reha_test$n.days)
 
@@ -798,6 +1169,15 @@ ggplot(drv_reha_test, aes(x = DIAG_VERAEND, y = n.days)) +
   #rotate x axis labels
   theme(axis.text.x = element_text(angle = 45, size = 8, hjust = 1)) 
 
+```
+
+
+# Check how results would change when excluding n.days_cat
+```{r exclude n.days_cat}
+model13.2 <- glmmTMB(unpl_drop ~ sex + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QWT_count_before_reha_cent + INPAT_count_before_reha_cent + age_cent*reha_id_cent + n.days_cat + (1|pragmaid), family = 
+                     "binomial", data = reha_final)
+summary(model13.2) 
+summary(model13) #staatsange und emp.type_unemployed werden signifikant
 ```
 Aus DRV Reha Infofile:
 

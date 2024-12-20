@@ -23,7 +23,7 @@ options(warn = -1)
 ```{r essentials}
 # clean workspace
 rm(list=ls())
-packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "glmmTMB", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet", "ggeffects", "DHARMa", "effects")
+packages <- c("data.table", "tidyverse", "ggplot2", "comorbidity", "car", "glmmTMB", "lme4", "ordinal", "export", "mclogit", "sjPlot", "see", "nnet", "ggeffects", "DHARMa", "effects", "performance")
 
 # Install packages not yet installed
 installed_packages <- packages %in% rownames(installed.packages())
@@ -162,18 +162,6 @@ inpat <- inpat %>%
 ## Any OVERLAPS between treatments within pragmaid?
 
 ```{r check_overlaps}
-
-overlap_check <- inpat %>%
-  group_by(pragmaid) %>%
-  summarize(
-    overlap = any(sapply(1:n(), function(i) {
-    any(date.treat.start[i] < date.treat.end[-i] & date.treat.end[i] > date.treat.start[-i])
-  }))) %>%
-  filter(overlap)  
-
-# Anzeigen der Ergebnisse mit Überlappungen
-print(overlap_check) # 15 Patienten haben überlappende Behandlungen
-
 inpat$overlap <- FALSE
 
 inpat <- inpat %>%
@@ -184,8 +172,10 @@ inpat <- inpat %>%
 
 table(inpat$overlap, useNA = "always") #45 cases with overlap
 
+overlapping_IDs <- inpat %>% filter(overlap == TRUE) %>% pull(pragmaid) %>% unique()
+
 # Plot erstellen, um Überlappungen zu visualisieren
-ggplot(inpat %>% filter(pragmaid %in% overlap_check$pragmaid), 
+ggplot(inpat %>% filter(pragmaid %in% overlapping_IDs), 
        aes(y = pragmaid)) +
   geom_segment(aes(x = date.treat.start, 
                    xend = date.treat.end, 
@@ -194,7 +184,7 @@ ggplot(inpat %>% filter(pragmaid %in% overlap_check$pragmaid),
                size = 5) +
   scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1)) +
   labs(x = "Date", y = "Pragma ID") +
-  theme_minimal() #some overlaps are not visible, as they are very short (1 day)
+  theme_minimal() 
 ```
 
 ## Optional: Overlaps in treatments entfernen
@@ -212,23 +202,26 @@ cases_to_remove <- inpat %>%
         ), TRUE
       ))) %>%
   group_by(pragmaid, group_overlap) %>%
-  mutate(keep = case_when(
-    n.days == max(n.days) & row_number() == sample(which(n.days == max(n.days)), 1) ~ "keep",
-    n.days == max(n.days) ~ "remove",
-    TRUE ~ "remove"
-  ))
+  mutate(
+    max_n_days = max(n.days),  # Maximalwert pro Gruppe berechnen
+    keep = case_when(
+      n.days == max_n_days & row_number() == which.max(n.days) ~ TRUE,  # Behalte die erste Zeile mit max_n_days
+      n.days == max_n_days ~ FALSE,                                   # Andere mit max_n_days auf FALSE setzen
+      TRUE ~ FALSE                                                    # Kleinere Werte ebenfalls auf FALSE
+    )
+  ) 
   
-cases_to_remove %>% arrange(pragmaid, date.treat.start) %>% select(pragmaid, date.treat.start, date.treat.end, overlap, group_overlap, keep)
+cases_to_remove %>% arrange(pragmaid, date.treat.start) %>% select(pragmaid, date.treat.start, date.treat.end, n.days, ENTL301, overlap, group_overlap, keep, max_n_days)
 
-#common columns in cases_to_remove and inpat
+#!!common columns in cases_to_remove and inpat
 common_cols <- intersect(names(cases_to_remove), names(inpat))
 
-sum(cases_to_remove$keep == "remove")
+sum(cases_to_remove$keep == FALSE)
 
 #inpat: remove cases with keep == "remove" in cases_to_remove
 inpat <- inpat %>% 
   left_join(cases_to_remove, by = common_cols) %>%
-  filter(is.na(keep) | keep == "keep") %>%
+  filter(is.na(keep) | keep == TRUE) %>%
   select(-c(overlap, group_overlap, keep, direkter_anschluss))
 
 ```
@@ -254,7 +247,7 @@ labels_entl301 <- c(
 )
 
 inpat$ENTL301 <- factor(inpat$ENTL301, levels = names(labels_entl301), labels = labels_entl301)
-
+table(inpat$ENTL301, useNA = "always")
 #Einteilung der ENTLASS Gründe in "ungeplant abgebrochen" vs "regulär beendet bzw. nicht ungeplant abgebrochen" (wenig sensitiv, aber spezifisch, dh wahrscheinlich werden viele Fälle verpasst, die ungeplant abgebrochen haben, aber dafür wenig falsch positive, dh hohe spezifität)
 inpat <- inpat %>% 
   filter(ENTL301 != "Tod") %>%
@@ -264,14 +257,12 @@ inpat <- inpat %>%
                  "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
   TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
 
-table(inpat$ENTL301, useNA = "always")
 table(inpat$unpl_drop, useNA = "ifany")
-
 prop.table(table(inpat$unpl_drop, useNA = "ifany"))
 ggplot(inpat, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(width = 0.1) + theme(axis.text.x = element_text(angle = 35, hjust = 1)) + ylim(NA, 75)
 
 #Fallzahl
-inpat %>% filter(ENTL301 != "Tod") %>% summarise(n = n(), npragmaid = n_distinct(pragmaid))
+inpat %>% summarise(n = n(), npragmaid = n_distinct(pragmaid))
 
 ```
 
@@ -351,9 +342,8 @@ inpat_check <- inpat %>%
 #correct inpat_id, so that it is ordered by date.treat.start
 inpat <- inpat %>% 
   group_by(pragmaid) %>%
-#  filter(ENTL301 != "Tod") %>% #exclude cases with ENTL301 == Tod)
   arrange(date.treat.start) %>%
-  mutate(inpat_id = row_number()) %>%
+  mutate(inpat_id = row_number() - 1) %>%
   mutate(treat_dur_cat = factor(case_when(
   #more than or 20 days in treatment
   n.days >= 21 ~ 3,
@@ -437,7 +427,7 @@ table(all_diagnoses$icd_type)
 diagnoses_inpat <- all_diagnoses %>% 
   filter(pragmaid %in% inpat_employ$pragmaid) %>% #keep only rows that are in inpat data 
   filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
-  filter(icd.alc == FALSE) %>%#keep only diaignoses that are not alcohol related (as all inpat cases are alcohol related)
+  filter(icd.alc == FALSE) %>% #keep only diaignoses that are not alcohol related (as all inpat cases are alcohol related)
   mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
 
 #check
@@ -695,6 +685,9 @@ med_fost_diagnoses_inpat_employ_qwt_reha %>% select(pragmaid, date.treat.start, 
 
 med_fost_diagnoses_inpat_employ_qwt_reha <- med_fost_diagnoses_inpat_employ_qwt_reha %>% filter(treatment == "inpat")
 
+#ungroup data
+med_fost_diagnoses_inpat_employ_qwt_reha <- med_fost_diagnoses_inpat_employ_qwt_reha %>% ungroup()
+
 ```
 
 # Auswahl relevanter Variablen
@@ -703,6 +696,52 @@ med_fost_diagnoses_inpat_employ_qwt_reha <- med_fost_diagnoses_inpat_employ_qwt_
 final_data <- med_fost_diagnoses_inpat_employ_qwt_reha %>% 
   select(-c(KH_FALL_ID, date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_inpat, fost.degree, source, died, date.death, yob, treatment))
 ```
+
+# Centering variables
+
+Center all continuous variables (i.e., subtract the mean, so the mean = 0). The coefficients are then interpreted as the change in the log odds of the outcome for a one-unit increase in the predictor, while holding all other predictors at their mean values. The intercept represents the log odds of the outcome when all predictors are at their mean values.
+
+
+```{r center}  
+
+variables_to_center <- c("age", "inpat_id", "elix_sum", "ndistinctATClevel2", "QWT_count_before_INPAT", "REHA_count_before_INPAT", "char_sum", "n.days")
+
+#centering
+for (var in variables_to_center) {
+  final_data[[paste0(var, "_cent")]] <- scale(final_data[[var]], center = TRUE, scale = FALSE)
+}
+```
+
+# Intercorrelation of (numeric) predictors/outcome
+
+```{r correlation}
+cor_matrix <-  cor(final_data %>% select(c("age", "inpat_id", "elix_sum", "ndistinctATClevel2", "QWT_count_before_INPAT", "REHA_count_before_INPAT", "char_sum", "n.days_cent")))
+cor_matrix
+cor_melted <- melt(cor_matrix)
+
+# Erstelle die Heatmap
+ggplot(cor_melted, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  #add correlation values as text
+  geom_text(aes(label = round(value, 2)), vjust = 1) +
+  theme_minimal() +
+  labs(x = "", y = "", title = "Correlation Heatmap") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# correlation of treatment duration and unplanned dropouts
+
+#with p values
+final_data$unpl_drop_numeric <- as.numeric(final_data$unpl_drop) - 1
+final_data$treat_dur_cat_numeric <- as.numeric(final_data$treat_dur_cat)
+
+cor.test(final_data$n.days_cent, final_data$unpl_drop_numeric, method = "spearman") # rho: -.37
+cor(final_data$treat_dur_cat_numeric, final_data$unpl_drop_numeric, method = "pearson") #-.40
+
+#remove unpl_drop_numeric and n.days_cat_numeric
+final_data <- final_data %>% select(-c(unpl_drop_numeric, treat_dur_cat_numeric))
+```
+
 
 # Speicherplatz freigeben
 
@@ -772,47 +811,14 @@ cutoff_QWT_count_before_INPAT <- quantile(final_data$QWT_count_before_INPAT, 0.7
 cutoff_QWT_count_before_INPAT
 ```
 
-## Standardizing variables
-
-Convert variables which do not have a meaningful zero point to z-scores (i.e. mean = 0, sd = 1). Coefficients are then interpreted as the change in the log odds of the outcome for a one standard deviation change in the predictor and the intercept is the log odds of the outcome when all predictors are zero (= in case of standardized variables, the mean of the variable).
-
-# not up to date: elix_sum, ndistinctATClevel2, QWT_count_before_INPAT, REHA_count_before_INPAT are not standardized, as they do have a meaningful zero point.
-
-```{r standardize}  
-#age
-final_data$age_std <- scale(final_data$age, center = TRUE, scale = TRUE)
-
-#inpat_id
-final_data$inpat_id_std <- scale(final_data$inpat_id, center = TRUE, scale = TRUE)
-
-#n.days
-final_data$n.days_std <- scale(final_data$n.days, center = TRUE, scale = TRUE)
-
-#elix_sum
-final_data$elix_sum_std <- scale(final_data$elix_sum, center = TRUE, scale = TRUE)
-
-#QWT_count_before_INPAT
-final_data$QWT_count_before_INPAT_std <- scale(final_data$QWT_count_before_INPAT, center = TRUE, scale = TRUE)
-
-#REHA_count_before_INPAT
-final_data$REHA_count_before_INPAT_std <- scale(final_data$REHA_count_before_INPAT, center = TRUE, scale = TRUE)
-
-#ndistinctATClevel2
-final_data$ndistinctATClevel2_std <- scale(final_data$ndistinctATClevel2, center = TRUE, scale = TRUE)
-
-#char_sum
-final_data$char_sum_std <- scale(final_data$char_sum, center = TRUE, scale = TRUE)
-```
-
-
 ## Multicollinearity
 
 ```{r multicollinearity}
-vif_model <- glm(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std, family = "binomial", data = final_data)
+vif_model <- glm(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent, family = "binomial", data = final_data)
 
 car::vif(vif_model) #no multicollinearity
 
-#"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
+#"A consequence is that when using adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 
 #correlation matrix
 #raq_poly <- psych::polychoric(items)
@@ -846,7 +852,7 @@ add_model_summary <- function(model, model_name) {
 }
 
 #nur Intercept und random effects
-model1 <- glmmTMB(unpl_drop ~ 1 + (1|pragmaid), family = "binomial", data = final_data)
+model1 <- glmmTMB(unpl_drop ~ 1 + (1|pragmaid), family = "binomial", data = final_data) #unconditional model
 summary(model1)
 add_model_summary(model1, "Intercept")
 
@@ -856,87 +862,102 @@ summary(model2)
 add_model_summary(model2, "Model 2")
 
 
-model3 <- glmmTMB(unpl_drop ~ sex + age_std + (1|pragmaid), family = "binomial", data = final_data)
+model3 <- glmmTMB(unpl_drop ~ sex + age_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model3)
 add_model_summary(model3, "Model 3")
 
-model4 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + (1|pragmaid), family = "binomial", data = final_data)
+model4 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model4) # Modell 4 bietet keinen Vorteil gegenüber Modell 3 -> INPAT ID rauslassen?
 add_model_summary(model4, "Model 4")
 
-model5 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + (1|pragmaid), family = "binomial", data = final_data)
+model5 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + (1|pragmaid), family = "binomial", data = final_data)
 summary(model5) # Modell 5 bietet keinen Vorteil gegenüber Modell 3 (außer leicht niedrigerer deviance)
 add_model_summary(model5, "Model 5")
 
 
-model6 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
+model6 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
 summary(model6) # Model 6 hat besseres AIC und deviance als Modell 3, aber schlechteres BIC
 add_model_summary(model6, "Model 6")
 
-model7 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + (1|pragmaid), family = "binomial", data = final_data)
+model7 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model7)
 add_model_summary(model7, "Model 7")
 
 
 # ist char_sum ein besserer Prädiktor?
-model8 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + char_sum_std + (1|pragmaid), family = "binomial", data = final_data)
+model8 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + char_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model8)
-add_model_summary(model8, "Model 8") # char_sum passt schlechter als elix_sum_std, ist aber auch signifikant
+add_model_summary(model8, "Model 8") # char_sum passt schlechter als elix_sum_cent, ist aber auch signifikant
 
-model9 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
+model9 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
 summary(model9)
 add_model_summary(model9, "Model 9") # keine Verbesserung gegenüber Modell 8
 
-model10 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + (1|pragmaid), family = "binomial", data = final_data)
+model10 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model10)
 add_model_summary(model10, "Model 10") 
 
-model11 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + (1|pragmaid), family = "binomial", data = final_data)
+model11 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model11)
 add_model_summary(model11, "Model 11") 
 
 
-model12 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + (1|pragmaid), family = "binomial", data = final_data)
+model12 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model12)
 add_model_summary(model12, "Model 12") 
 
-model13 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von REHA_count_before_INPAT_std ist nicht signifikant und verschlechtert model fit (auch wenn Reihenfolge umgekehr, dh wenn erst REHA count und dann QWT count aufgenommen wird)
+model13 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von REHA_count_before_INPAT_cent ist nicht signifikant und verschlechtert model fit (auch wenn Reihenfolge umgekehr, dh wenn erst REHA count und dann QWT count aufgenommen wird)
 summary(model13)
 add_model_summary(model13, "Model 13") 
+```
 
-model14 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std + nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age_std verbessert AIC und LogLik leicht, Interaktion ist signifikant
+# Interaktionen mit inpat_id
+```{r interactions}
+model14 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*age_cent + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id*age_cent verbessert AIC und LogLik leicht, age_cent:inpat_id_cent knapp nicht signifikant
 summary(model14)
 add_model_summary(model14, "Model 14") 
+anova(model13, model14, test = "LRT") 
+anova(model1, model13, test = "LRT") 
 
-model15 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + inpat_id_std*sex + (1|pragmaid), family = "binomial", data = final_data) 
-#Interaktion inpat_id_std*sex ist nicht signifikant
-
+model15 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*sex + (1|pragmaid), family = "binomial", data = final_data) 
+#Interaktion inpat_id_cent*sex ist nicht signifikant
 summary(model15)
 add_model_summary(model15, "Model 15") 
-#Ist Modelverbesserung signifikant durch Hinzunahme von inpat_id_std*sex?
-d14 <- as.numeric(-2*logLik(model14)) #is the -2LL for mod0
-d15 <- as.numeric(-2*logLik(model15)) #is the -2LL for mod2
-ldif <- d14 - d15 #is the -2LL difference
-degfr <- 1 #difference in the number of parameters. degfr is 1 because mod15 has one extra parameter
-##compute the p-value.
-pchisq(ldif, degfr, lower.tail = FALSE) #.13
-#the -2LL of Model15 is not significantly closer to 0
 
-Anova(model12)
-Anova(model12,type="III") # to do: set sum-to-zero contrasts on factors and center numerical covariates
-
-model16 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + inpat_id_std*elix_sum_std + (1|pragmaid), family = "binomial", data = final_data)
-summary(model16) #Hinzunahme von Interaktion inpat_id_std*elix*sum verbessert modelfit nicht
+model16 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*elix_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model16) #inpat_id_cent:elix_sum_cent nicht signifikant
 add_model_summary(model16, "Model 16") 
 
 
-model17 <- glmmTMB(unpl_drop ~ sex + age_std + inpat_id_std+ nationality + emp.type + elix_sum_std + fost.degree_bin + ndistinctATClevel2_std + treat_dur_cat + QWT_count_before_INPAT_std + REHA_count_before_INPAT_std + inpat_id_std*age_std + sex*age_std + (1|pragmaid), family = "binomial", data = final_data) #Hinzunahme von Interaktion inpat_id_std*age_std verbessert AIC und LogLik leicht, Interaktion ist signifikant
-summary(model17) #Hinzunahme von Interaktion sex*age_std verbessert modelfit nicht
+model17 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*nationality + (1|pragmaid), family = "binomial", data = final_data) 
+summary(model17) #inpat_id_cent:nationality nicht signifikant
 add_model_summary(model17, "Model 17") 
 
+model_18 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*emp.type + (1|pragmaid), family = "binomial", data = final_data)
+summary(model_18) #inpat_id_cent:emp.type nicht signifikant
+add_model_summary(model_18, "Model 18")
 
-#Interpretation: Bei einer geringen Anzahl von Behandlungen (niedrige inpat_id_std) nimmt die Wahrscheinlichkeit eines Abbruchs stärker mit dem Alter ab. Bei einer höheren Anzahl von Behandlungen ist der Einfluss des Alters weniger stark.
+model_19 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
+summary(model_19) #inpat_id_cent:fost.degree_bin nicht signifikant
+add_model_summary(model_19, "Model 19")
 
+model_20 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model_20) #inpat_id_cent:ndistinctATClevel2_cent nicht signifikant
+add_model_summary(model_20, "Model 20")
+
+model_21 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*QWT_count_before_INPAT_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model_21) #inpat_id_cent:QWT_count_before_INPAT_cent nicht signifikant
+add_model_summary(model_21, "Model 21")
+
+model_22 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + REHA_count_before_INPAT_cent + inpat_id_cent*REHA_count_before_INPAT_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model_22) #inpat_id_cent:REHA_count_before_INPAT_cent nicht signifikant
+add_model_summary(model_22, "Model 22")
+
+```
+
+# Evaluate model fit
+
+```{r model_fit}
 #find the best fitting model
 choose_best_model <- function(summary_df, criterion) {
   if (!criterion %in% names(summary_df)) {
@@ -956,17 +977,192 @@ choose_best_model(model_summaries, "BIC")
 choose_best_model(model_summaries, "AIC") 
 choose_best_model(model_summaries, "LogLik") 
 
+#plot model summaries as skree plot
+model_summaries_long <- model_summaries %>%
+  pivot_longer(cols = c(LogLik, AIC, BIC), names_to = "Criterion", values_to = "Value")
+
+#desired order of models: intercept, model 2, model 3, model 4, model 5, model 6, model 7, model 8, model 9, model 10, model 11, model 12, model 13, model 14, model 15, model 16, model 17
+model_summaries_long$Model <- factor(model_summaries_long$Model, levels = c("Intercept", "Model 2", "Model 3", "Model 4", "Model 5", "Model 6", "Model 7", "Model 8", "Model 9", "Model 10", "Model 11", "Model 12", "Model 13", "Model 14", "Model 15", "Model 16", "Model 17", "Model 18", "Model 19", "Model 20", "Model 21", "Model 22"))
+
+ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
+  geom_point(stat = "identity") +
+  geom_line(aes(group = Criterion)) +
+  facet_wrap(~Criterion, scales = "free_y") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(
+    title = "Model Comparison",
+    x = "Model",
+    y = "Criterion Value"
+  )
+
+
+#Ist Modelverbesserung signifikant durch Hinzunahme von inpat_id_cent*sex?
+d14 <- as.numeric(-2*logLik(model14)) #is the -2LL for mod0
+d15 <- as.numeric(-2*logLik(model15)) #is the -2LL for mod2
+ldif <- d14 - d15 #is the -2LL difference
+degfr <- 1 #difference in the number of parameters. degfr is 1 because mod15 has one extra parameter
+##compute the p-value.
+pchisq(ldif, degfr, lower.tail = FALSE) #.14
+#the -2LL of Model15 is not significantly closer to 0
+
+Anova(model12)
+Anova(model12,type="III") # to do: set sum-to-zero contrasts on factors and center numerical covariates
+
 ```
 
+# Decide on best model 
+```{r best_model}
+best_model <- model13
+```
+
+# Model diagnostics: ICC and R2
+```{r model_iccr2}
+#R2 = proportion of the explained variance (of the full model)
+performance::r2_nakagawa(best_model) #conditional R2: 21.3%, marginal R2: 4.8%
+
+# ICC = proportion of explained variance that can be attributed to the random effects
+residual_var <- pi^2 / 3
+random_effects_var <- as.numeric(VarCorr(best_model)$pragmaid[1])
+ICC <- random_effects_var / (random_effects_var + residual_var)
+print(ICC) #.173
+performance::icc(best_model) #etwa 17% der outcomevarianz wird durch unterschiede in den gruppen (pragmaID) erklärt
+```
+## Odds Ratios of significant predictors
+```{r odds_ratios}
+# Odds Ratios
+coefficents <- summary(best_model)$coefficients$cond[, 1]
+se <- summary(best_model)$coefficients$cond[, 2]
+
+odds_ratios <- exp(coefficents) #odds ratios
+
+#95% confidence intervals
+ci_lower <- exp(coefficents - 1.96 * se)
+ci_upper <- exp(coefficents + 1.96 * se)
+
+#combine into a data frame
+odds_ratios_df <- data.frame(
+  Predictor = names(coefficents),
+  OR = odds_ratios,
+  CI_lower = ci_lower,
+  CI_upper = ci_upper,
+  p = summary(best_model)$coefficients$cond[, 4]
+)
+rownames(odds_ratios_df) <- NULL
+```
+
+
+# Fallzahlen und Stichprobenbeschreibung
+```{r sample_size}
+# wie viele patients?
+n_pat <- final_data %>% distinct(pragmaid) %>% nrow()
+# wie viele Behandlungen?
+n_treats <- final_data %>% nrow()
+
+print(n_pat)
+print(n_treats)
+
+#share dropouts
+prop.table(table(final_data$unpl_drop))
+
+#AGE
+summary(final_data$age)
+sd(final_data$age)
+
+#SEX
+prop.table(table(final_data$sex))
+
+#emp.type
+prop.table(table(final_data$emp.type))
+
+#nationality
+prop.table(table(final_data$nationality))
+
+#elix_sum
+summary(final_data$elix_sum)
+
+#ndistinctATClevel2
+summary(final_data$ndistinctATClevel2)
+
+#fost.degree_bin
+prop.table(table(final_data$fost.degree_bin))
+
+#REHA_count_before_inpat
+summary(final_data$REHA_count_before_INPAT)
+
+#QWT_count_before_INPAT
+summary(final_data$QWT_count_before_INPAT)
+
+#inpat_id
+summary(final_data$inpat_id)
+
+#anzahl distinkter pragmaIDs mit qwt_id > 0 / anzahl aller distinkter pragmaIDs = anteil der patienten mit mehr als einer QWT
+(final_data %>% filter(inpat_id > 0) %>% distinct(pragmaid) %>% nrow()) / n_pat 
+#mehr als 2 QWTs
+(final_data %>% filter(inpat_id > 1) %>% distinct(pragmaid) %>% nrow()) / n_pat
+#mehr als 3 QWTs
+(final_data %>% filter(inpat_id > 2) %>% distinct(pragmaid) %>% nrow()) / n_pat
+#mehr als 4 QWTs
+(final_data %>% filter(inpat_id > 4) %>% distinct(pragmaid) %>% nrow()) / n_pat
+
+#average number of treatments per patient
+#INPAT
+n_treats_inpat <- final_data %>% group_by(pragmaid) %>% summarise(n_treats = n()) %>% pull(n_treats)
+summary(n_treats_inpat)
+
+#REHA
+n_treats_reha <- final_data %>%
+  group_by(pragmaid) %>%
+  slice_max(REHA_count_before_INPAT, with_ties = FALSE) %>% 
+  ungroup() %>%
+  pull(REHA_count_before_INPAT)
+summary(n_treats_reha)
+
+#QWT
+n_treats_qwt <- final_data %>%
+  group_by(pragmaid) %>%
+  slice_max(QWT_count_before_INPAT, with_ties = FALSE) %>% 
+  ungroup() %>%
+  pull(QWT_count_before_INPAT)
+summary(n_treats_qwt)
+
+
+```
 # Predicted Probabilities
 
 ```{r plot_pred_probs}
 # Predicted probabilities
-# Erstelle ein neues Datenset, durch das die interessierenden Variablen variiert werden
+new_labels <- c(
+  "(Intercept)" = "Intercept", 
+  "age_cent" = "Alter",
+  "inpat_id_cent" = "Behandlungserfahrung INPAT",
+  "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
+  "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht-deutsch)",
+  "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
+  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
+  "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
+  "elix_sum_cent" = "Elixhauser-Score",
+  "fost.degree_binja" = "Pflegestatus: vorhanden\n(Ref.: nicht vorhanden)",
+  "ndistinctATClevel2_cent" = "Anzahl Medikationen",
+  "QWT_count_before_INPAT_cent" = "Behandlungserfahrung QWT",
+  "REHA_count_before_INPAT_cent" = "Behandlungserfahrung REHA"
+)
 
-coefffix_plot <- sjPlot::plot_model(model14, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
 
-plot(ggpredict(model14, terms = c("age_std", "inpat_id_std")))
+coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.6, 3), wrap.labels = 100)
+
+coefffix_plot <- coefffix_plot + 
+  #change size of axis labels
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 12))
+  
+coefffix_plot
+
+#save plot
+graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_INPAT.png"), width=7.5, height=4.5)
+
+#
+
+plot(ggpredict(best_model, terms = c("age_cent", "inpat_id_cent")))
 
 #graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_inpat.png"), width=7, height=5)
 
@@ -974,18 +1170,20 @@ plot(ggpredict(model14, terms = c("age_std", "inpat_id_std")))
 ae <- allEffects(model14)
 plot(ae)
 
-plot(ae["age_std:inpat_id_std"])
+plot(ae["age_cent:inpat_id_cent"])
 plot(ae["sex"])
-plot(ae["elix_sum_std"])
+plot(ae["elix_sum_cent"])
 plot(ae["treat_dur_cat"])
-plot(ae["REHA_count_before_INPAT_std"])
+plot(ae["REHA_count_before_INPAT_cent"])
+
+#Interaktion zwischen inpat_id und age: bei geringer bzw. durchschnittlicher Anzahl von Behandlungen nimmt die Wahrscheinlichkeit eines Abbruchs stärker mit dem Alter ab. Bei einer höheren Anzahl von Behandlungen (! SD über dem Mittelwert) gibt es keinen Einfluss des Alters auf die Wahrscheinlichkeit eines Abbruchs.
 ```
 
 # model checking and diagnostics
 
 ```{r residuals}
 
-model_simres <- simulateResiduals(model14)
+model_simres <- simulateResiduals(best_model)
 plot(model_simres)
 ```
 Keine signifikante Abweichung in der Verteilung der Residuen (p-Wert des KS-Tests > 0.05).
@@ -997,50 +1195,21 @@ Visuell zeigen die Residuen keine systematischen Muster.
 
 # ASSUMPTIONS:
 #Linearity: Linear relationship between continuous variables and the logit transformation of the outcome variable. 
+# not necessary as the DHARMa residual plot (Residualwerte (y-Achse) gegen die vorhergesagten Werte (x-Achse)) looks fine
+```
 
-probabilities <- predict(model8, type = "response")
-#dataset with only continuous variables
-final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, elix_sum)))
+# Fallzahlen
+```{r sample_size}
+# wie viele patients?
+n_pat <- final_data %>% distinct(pragmaid) %>% nrow()
+# wie viele Behandlungen?
+n_treats <- final_data %>% nrow()
 
-predictors <- colnames(final_data_cont)
+print(n_pat)
+print(n_treats)
 
-
-# Logit für jede Kategorie berechnen 
-logits <- apply(probabilities, 2, function(p) log(p / (1 - p)))
-
-logits_df <- as.data.frame(logits) 
-combined_data <- cbind(final_data_cont, logits_df)
-
-final_data_long <- combined_data %>%
-  pivot_longer(
-    cols = all_of(names(logits_df)),  # Nutze die Spaltennamen deiner logits_df direkt
-    names_to = "category",
-    values_to = "logit"
-  ) %>%
-  pivot_longer(
-    cols = all_of(predictors),   # Stelle sicher, dass predictors existiert
-    names_to = "predictors",
-    values_to = "predictor.value"
-  )
-
-# Scatterplot
-ckeck_lin <- ggplot(final_data_long, aes(x = predictor.value, y = logit)) +
-  geom_point(size = 0.5, alpha = 0.5) +
-  geom_smooth(method = "loess") +
-  theme_bw() +
-  facet_grid(category ~ predictors, scales = "free") +
-  labs(
-    title = "Beziehung zwischen Prädiktoren und Logits",
-    x = "Prädiktorwert",
-    y = "Logit"
-  ) +
-    theme(
-    strip.text = element_text(size = 6)  # Verkleinert die Textgröße für Facettenbeschriftungen
-  )
-
-ggsave("check_linearity.png", ckeck_lin, width = 20, height = 25, units = "cm")
-
-#looks mostly fine, but maybe some problems with elix_sum (plot for 7-20 days), looks rather cubic than linear
+#share of dropouts
+prop.table(table(final_data$unpl_drop))
 ```
 
 
@@ -1132,4 +1301,10 @@ choose_best_model(model_summaries, "Deviance") #Model 11 hat den besten fit
 #ggplot(qwt_inpat, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1)) + facet_wrap(~dataset)
 
 ```
+# Check how results would change when excluding n.days_cat
+```{r exclude n.days_cat}
+model14.2 <- glmmTMB(unpl_drop ~ sex + age_cent + inpat_id_cent+ nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QWT_count_before_INPAT_cent + treat_dur_cat + REHA_count_before_INPAT_cent + inpat_id_cent*age_cent + (1|pragmaid), family = "binomial", data = final_data) 
 
+summary(model14.2) 
+summary(best_model) #elixsum signifikant, in model mit treat_dur_cat nicht signifikant, QWT_count_before_INPAT_cent und age_cent:inpat_id_cent knapp nicht mehr signifikant
+```
