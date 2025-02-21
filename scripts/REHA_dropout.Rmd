@@ -1018,7 +1018,7 @@ new_labels <- c(
   "elix_sum_cent" = "Elixhauser-Score",
   "fost.degree_binja" = "Pflegestatus: vorhanden\n(Ref.: nicht vorhanden)",
   "ndistinctATClevel2_cent" = "Anzahl Medikationen",
-  "INPAT_count_before_reha_cent" = "Behandlungserfahrung INPAT",
+  "INPAT_count_before_reha_cent" = "Behandlungserfahrung SAB",
   "QWT_count_before_reha_cent" = "Behandlungserfahrung QE",
   "MASSN_ARTstationäre Maßnahme" = "Behandlungsart: stationär\n(Ref.: ambulant)",
   "MASSN_ARTganztägig ambulante Maßnahme" = "Behandlungsart: ganztägig ambulant\n(Ref.: ambulant)"

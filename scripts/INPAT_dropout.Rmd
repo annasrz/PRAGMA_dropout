@@ -1134,7 +1134,7 @@ summary(n_treats_qwt)
 new_labels <- c(
   "(Intercept)" = "Intercept", 
   "age_cent" = "Alter",
-  "inpat_id_cent" = "Behandlungserfahrung INPAT",
+  "inpat_id_cent" = "Behandlungserfahrung SAB",
   "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
   "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht-deutsch)",
   "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",

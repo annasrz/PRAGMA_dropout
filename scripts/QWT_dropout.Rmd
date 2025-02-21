@@ -1143,9 +1143,9 @@ new_labels <- c(
   "elix_sum_cent" = "Elixhauser-Score",
   "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
   "ndistinctATClevel2_cent" = "Anzahl Medikationen",
-  "INPAT_count_before_qwt_cent" = "Behandlungserfahrung INPAT",
+  "INPAT_count_before_qwt_cent" = "Behandlungserfahrung SAB",
   "REHA_count_before_qwt_cent" = "Behandlungserfahrung REHA",
-  "qwt_id_cent:INPAT_count_before_qwt_cent" = "Behandlungserfahrung QExINPAT"
+  "qwt_id_cent:INPAT_count_before_qwt_cent" = "Behandlungserfahrung QExSAB"
 )
 
 
