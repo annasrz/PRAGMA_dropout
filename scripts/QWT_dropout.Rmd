@@ -883,13 +883,129 @@ cutoff_ndistinctATClevel2
 #final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
 ```
 
+## Linearer Zusammenhang mit Logit des Outcomes
+
+Der Zusammenhang zwischen Prädiktoren und der abhängiggen Variablen irreguläre Beendigung der Behandlung soll mittels logistischen Regressionsmodellen geschätzt werden. Dafür muss zunächst die Modellannahme geprüft werden, dass ein linearer Zusammenhang zwischen metrischen Prädikoren und dem Logit des Outcomes besteht. Um diese Annahme zu testen, werden die logistischen Regressionsmodelle geschätzt und zusätzliche Prädiktoren inkludiert, die die Interkation zwischen dem jeweiligen metrischen Prädiktor und deren Logarithmus darstellen (Hosmer & Lemeshow, 1989).
+Relevant ist nur, ob die Interaktionstermine signifikant sind. Jede signifikante Interaktion deutet darauf hin, dass der jeweilige Haupteffekt die Annahme der Linearität im Logit verletzt. 
+
+```{r linearity_test}
+# Erstellen der Interaktionsterme der metrischen Prädiktoren mit ihrem Logarithmus
+final_data$logageInt <- log(final_data$age+1) * final_data$age
+final_data$logqwt_idInt <- log(final_data$qwt_id+1) * final_data$qwt_id
+final_data$logelix_sumInt <- log(final_data$elix_sum+1) * final_data$elix_sum
+final_data$logndistinctATClevel2Int <- log(final_data$ndistinctATClevel2+1) * final_data$ndistinctATClevel2
+final_data$logREHA_count_before_qwtInt <- log(final_data$REHA_count_before_qwt+1) * final_data$REHA_count_before_qwt
+final_data$logINPAT_count_before_qwtInt <- log(final_data$INPAT_count_before_qwt+1) * final_data$INPAT_count_before_qwt
+
+
+
+outcomes <- c("unpl_drop")
+
+
+predictors <- "sex + nationality + emp.type + age + fost.degree_bin + logageInt + qwt_id + logqwt_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + REHA_count_before_qwt + logREHA_count_before_qwtInt + INPAT_count_before_qwt + logINPAT_count_before_qwtInt"
+
+
+models <- list()
+
+# Schleife, um 1 Modell je Outcome zu fitten
+for (outcome in outcomes) {
+  formula <- as.formula(paste(outcome, "~", predictors))
+  models[[outcome]] <- glm(formula, data = final_data, family = binomial(link = "logit"))
+  cat("\n\n", outcome, "\n")
+  print(summary(models[[outcome]]))
+}
+
+```
+
+#logageInt und logInpat_count_before_qwtInt sind signifikant -> Annahme der Linearität im Logit verletzt
+
+## Sind Log-Tranformationen geeignet?
+```{r check_log_transformation}
+
+#age
+data_test_age <- final_data %>%
+  mutate(bin = cut(age, breaks = 10)) %>%
+  group_by(bin) %>%
+  summarise(
+    mean_pred = mean(age, na.rm = TRUE),
+    p = mean(as.numeric(unpl_drop), na.rm = TRUE),
+    logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit-Transformation mit Laplace-Korrektur (falls p = 0 oder p = 1)
+    n = n()
+  )
+
+ggplot(data_test_age, aes(x = mean_pred, y = logit_p)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  geom_text(aes(label = n), hjust = 0, vjust = 0) +
+  labs(
+    title = "Überprüfung der log-linearen Beziehung: age für unpl_drop",
+    x = "Prädiktor age",
+    y = "Logit(P(Y=1))"
+  )
+
+data_test_INPAT_count_before_qwt <- final_data %>%
+  mutate(bin = cut(INPAT_count_before_qwt, breaks = 10)) %>%
+  group_by(bin) %>%
+  summarise(
+    mean_pred = mean(INPAT_count_before_qwt, na.rm = TRUE),
+    p = mean(as.numeric(unpl_drop), na.rm = TRUE),
+    logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit-Transformation mit Laplace-Korrektur (falls p = 0 oder p = 1)
+    n = n()
+  )
+
+ggplot(data_test_INPAT_count_before_qwt, aes(x = mean_pred, y = logit_p)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  geom_text(aes(label = n), hjust = 0, vjust = 0) +
+  labs(
+    title = "Überprüfung der log-linearen Beziehung: INPAT_count_before_qwt für unpl_drop",
+    x = "Prädiktor INPAT_count_before_qwt",
+    y = "Logit(P(Y=1))"
+  )
+
+
+```
+Logarithmische Transformationen der Prädiktoren scheinen eher nicht geeignet zu sein. Daher werden stattdessen Kategorien erstellt.
+
+# Kategorisierung von Prädiktoren
+```{r categorize}
+tertile_limits_i <- quantile(final_data$INPAT_count_before_qwt[final_data$INPAT_count_before_qwt > 0], probs = c(0.33, 0.66))
+
+final_data <- final_data %>% mutate(
+  INPAT_count_before_qwt_cat = case_when(
+    INPAT_count_before_qwt == 0 ~ "0",
+    INPAT_count_before_qwt <= tertile_limits_i[1] ~ "1",
+    INPAT_count_before_qwt <= tertile_limits_i[2] ~ "2",
+    TRUE ~ "3+") %>% factor(levels = c("0", "1", "2", "3+"))
+)
+
+# Check
+table(final_data$INPAT_count_before_qwt_cat, final_data$INPAT_count_before_qwt, useNA = "always")
+table(final_data$INPAT_count_before_qwt_cat)
+
+
+
+final_data <- final_data %>% mutate(
+  agegroup = case_when(
+    age <=34 ~ "18-34",
+    age <=44 ~ "35-44",
+    age <=54 ~ "45-54",
+    age <=64 ~ "55-64",
+    TRUE ~ "65+"
+  ) %>% factor(levels = c("18-34", "35-44", "45-54", "55-64", "65+"))
+)
+
+table(final_data$agegroup, final_data$age, useNA = "always")
+table(final_data$agegroup)
+```
+
 # check for multicollinearity
 ```{r multicollinearity}
 #Just run “linear regression” after assuming categorical dependent variable as continuous variable
 #final_data$treat_dur_cat_num <- as.numeric(final_data$treat_dur_cat)
 #vif_model <- lm(treat_dur_cat_num ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + REHA_count_before_qwt + INPAT_count_before_qwt, data = final_data)
 
-vif_model_ENTL <- glm(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent, data = final_data, family = "binomial")
+vif_model_ENTL <- glm(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat, data = final_data, family = "binomial")
 
 #car::vif(vif_model) #no multicollinearity
 car::vif(vif_model_ENTL)
@@ -929,60 +1045,60 @@ model2_log <- glmmTMB(unpl_drop ~ sex + (1|pragmaid), family = "binomial", data 
 summary(model2_log)
 add_model_summary_log(model2_log, "Model 2")
 
-model3_log <- glmmTMB(unpl_drop ~ sex + age_cent + (1|pragmaid), family = "binomial", data = final_data)
+model3_log <- glmmTMB(unpl_drop ~ sex + agegroup + (1|pragmaid), family = "binomial", data = final_data)
 summary(model3_log)
 add_model_summary_log(model3_log, "Model 3")
 
-model4_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model4_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model4_log)
 add_model_summary_log(model4_log, "Model 4")
 
-model5_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + (1|pragmaid), family = "binomial", data = final_data)
+model5_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + (1|pragmaid), family = "binomial", data = final_data)
 summary(model5_log)
 add_model_summary_log(model5_log, "Model 5")
 
-model6_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
+model6_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
 summary(model6_log)
 add_model_summary_log(model6_log, "Model 6")
 
 # Modell mit elix_sum_cent
-model7_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + (1|pragmaid), 
+model7_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + (1|pragmaid), 
                       family = "binomial", data = final_data)
 summary(model7_log)
 add_model_summary_log(model7_log, "Model 7")
 
 # Modell mit char_sum_cent (statt elix_sum_cent)
-model8_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + char_sum_cent + (1|pragmaid), 
+model8_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + char_sum_cent + (1|pragmaid), 
                       family = "binomial", data = final_data)
 summary(model8_log)
 add_model_summary_log(model8_log, "Model 8")
 
 # Modell mit elix_sum_cent und fost.degree_bin
-model9_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + (1|pragmaid), 
+model9_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + (1|pragmaid), 
                       family = "binomial", data = final_data)
 summary(model9_log)
 add_model_summary_log(model9_log, "Model 9")
 
 # Modell mit ndistinctATClevel2_cent
-model10_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
+model10_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model10_log)
 add_model_summary_log(model10_log, "Model 10")
 
 # Modell mit treat_dur_cat
-model11_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
+model11_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model11_log)
 add_model_summary_log(model11_log, "Model 11")
 
 # Modell mit REHA_count_before_qwt_cent
-model12_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + (1|pragmaid), 
+model12_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model12_log)
 add_model_summary_log(model12_log, "Model 12")
 
-# Modell mit INPAT_count_before_qwt_cent
-model13_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + (1|pragmaid), 
+# Modell mit INPAT_count_before_qwt_cat
+model13_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model13_log)
 add_model_summary_log(model13_log, "Model 13")
@@ -992,46 +1108,49 @@ add_model_summary_log(model13_log, "Model 13")
 # Modell mit Interaktion von qwt_id mit anderen Prädiktoren
 ```{r interaction}
 
-model14_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + age_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model14_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + agegroup*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model14_log)
-add_model_summary_log(model14_log, "Model 14") #keine signifikante Interaktion
+add_model_summary_log(model14_log, "Model 14") #signifikante Interaktion!
+plot(ggeffects::ggpredict(model14_log, terms = c("qwt_id_cent", "agegroup")))
+anova(model13_log, model14_log, test = "Chisq") #keine Modellverbesserung
 
-model15_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + sex*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
+
+model15_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + sex*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
 summary(model15_log)
 add_model_summary_log(model15_log, "Model 15") #keine signifikante Interaktion
 
-model16_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + nationality*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
+model16_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + nationality*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
 summary(model16_log)
 add_model_summary_log(model16_log, "Model 16") #keine signifikante Interaktion
 
-model17_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + emp.type*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
+model17_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + emp.type*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
 summary(model17_log)
-add_model_summary_log(model17_log, "Model 17") # signifikante Interaktion!!
+add_model_summary_log(model17_log, "Model 17") #keine signifikante Interaktion
 plot(ggeffects::ggpredict(model17_log, terms = c("qwt_id_cent", "emp.type")))
 
-model18_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + elix_sum_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model18_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + elix_sum_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model18_log)
 add_model_summary_log(model18_log, "Model 18") #keine signifikante Interaktion
 
-model19_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + fost.degree_bin*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model19_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + fost.degree_bin*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model19_log)
 add_model_summary_log(model19_log, "Model 19") #keine signifikante Interaktion
 
-model20_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + ndistinctATClevel2_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model20_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + ndistinctATClevel2_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model20_log)
 add_model_summary_log(model20_log, "Model 20") #keine signifikante Interaktion
 
-model21_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + REHA_count_before_qwt_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model21_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + REHA_count_before_qwt_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model21_log)
 add_model_summary_log(model21_log, "Model 21") #keine signifikante Interaktion
 
-model22_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + INPAT_count_before_qwt_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model22_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + INPAT_count_before_qwt_cat*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model22_log)
 add_model_summary_log(model22_log, "Model 22") #signifikante Interaktion!!
-anova(model13_log, model22_log, test = "Chisq")
-anova(model1_log, model22_log, test = "Chisq")
 
-model23_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + INPAT_count_before_qwt_cent*qwt_id_cent + emp.type * qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+
+
+model23_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat  + emp.type * qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model23_log)
 add_model_summary_log(model23_log, "Model 23")
 
@@ -1079,7 +1198,7 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
 ```
 # Decide on best model 
 ```{r best_model}
-best_model <- model22_log
+best_model <- model13_log
 ```
 
 # Model diagnostics: ICC and R2
@@ -1093,6 +1212,7 @@ random_effects_var <- VarCorr(best_model)$cond$pragmaid[1, 1]
 ICC <- random_effects_var / (random_effects_var + residual_var) #thisa is also the adjusted variance (i.e. the variance that is explained by the random effects without the fixed effects variance in the denominator)
 print(ICC) #.42
 performance::icc(best_model) #.42 = etwa 42% der outcomevarianz wird durch unterschiede in den gruppen (pragmaID) erklärt
+anova(model1_log, best_model, test = "Chisq") 
 
 
 ```
@@ -1133,7 +1253,10 @@ plot(model_simres)
 # Predicted probabilities
 new_labels <- c(
   "(Intercept)" = "Intercept", 
-  "age_cent" = "Alter",
+  "agegroup35-44" = "Alter: 35-44\n(Ref.: 18-34)",
+  "agegroup45-54" = "Alter: 45-54\n(Ref.: 18-34)",
+  "agegroup55-64" = "Alter: 55-64\n(Ref.: 18-34)",
+  "agegroup65+" = "Alter: 65+\n(Ref.: 18-34)",
   "qwt_id_cent" = "Behandlungserfahrung QE",
   "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
   "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht deutsch)",
@@ -1143,13 +1266,14 @@ new_labels <- c(
   "elix_sum_cent" = "Elixhauser-Score",
   "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
   "ndistinctATClevel2_cent" = "Anzahl Medikationen",
-  "INPAT_count_before_qwt_cent" = "Behandlungserfahrung SAB",
-  "REHA_count_before_qwt_cent" = "Behandlungserfahrung REHA",
-  "qwt_id_cent:INPAT_count_before_qwt_cent" = "Behandlungserfahrung QExSAB"
+  "INPAT_count_before_qwt_cat1" = "Behandlungserfahrung SAB: 1\n(Ref.: 0)",
+  "INPAT_count_before_qwt_cat2" = "Behandlungserfahrung SAB: 2\n(Ref.: 0)",
+  "INPAT_count_before_qwt_cat3+" = "Behandlungserfahrung SAB: 3+\n(Ref.: 0)",
+  "REHA_count_before_qwt_cent" = "Behandlungserfahrung REHA"
 )
 
 
-coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.6, 3), wrap.labels = 100)
+coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.092, 3), wrap.labels = 100)
 
 coefffix_plot <- coefffix_plot + 
   #change size of axis labels
@@ -1159,21 +1283,21 @@ coefffix_plot <- coefffix_plot +
 coefffix_plot
 
 #save plot
-graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_QE.png"), width=7.5, height=5)
+graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_QE.png"), width=7.5, height=6)
 
 #Interaktion)
-interact_plot <- plot(ggeffects::ggpredict(model22_log, terms = c("qwt_id_cent", "INPAT_count_before_qwt_cent [-1, 0, 1, 3, 5]")))
-
-interact_plot <- interact_plot + 
-  ggtitle("") +                 
-  labs(x = "Behandlungserfahrung QE",             
-       y = "Vorhergesagte Wahrscheinlichkeit irreguläre Beendigung",
-       color = "Behandlungserfahrung\nINPAT") +       
-  theme_minimal()                                    
-interact_plot
-
-#save plot
-graph2doc(x = interact_plot, file=file.path(folder_plot, "interact_plot_QE.png"), width=7.5, height=5)
+# interact_plot <- plot(ggeffects::ggpredict(model22_log, terms = c("qwt_id_cent", "INPAT_count_before_qwt_cent [-1, 0, 1, 3, 5]")))
+# 
+# interact_plot <- interact_plot + 
+#   ggtitle("") +                 
+#   labs(x = "Behandlungserfahrung QE",             
+#        y = "Vorhergesagte Wahrscheinlichkeit irreguläre Beendigung",
+#        color = "Behandlungserfahrung\nINPAT") +       
+#   theme_minimal()                                    
+# interact_plot
+# 
+# #save plot
+# graph2doc(x = interact_plot, file=file.path(folder_plot, "interact_plot_QE.png"), width=7.5, height=5)
 
 
 ```
