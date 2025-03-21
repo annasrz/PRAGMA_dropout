@@ -687,6 +687,42 @@ car::vif(vif_model)
 #car::vif(vif_model_VERLAUF)
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 ```
+## Linearer Zusammenhang mit Logit des Outcomes
+
+Der Zusammenhang zwischen Prädiktoren und der abhängiggen Variablen irreguläre Beendigung der Behandlung soll mittels logistischen Regressionsmodellen geschätzt werden. Dafür muss zunächst die Modellannahme geprüft werden, dass ein linearer Zusammenhang zwischen metrischen Prädikoren und dem Logit des Outcomes besteht. Um diese Annahme zu testen, werden die logistischen Regressionsmodelle geschätzt und zusätzliche Prädiktoren inkludiert, die die Interkation zwischen dem jeweiligen metrischen Prädiktor und deren Logarithmus darstellen (Hosmer & Lemeshow, 1989).
+Relevant ist nur, ob die Interaktionstermine signifikant sind. Jede signifikante Interaktion deutet darauf hin, dass der jeweilige Haupteffekt die Annahme der Linearität im Logit verletzt. 
+
+```{r linearity_test}
+# Erstellen der Interaktionsterme der metrischen Prädiktoren mit ihrem Logarithmus
+reha_final$logageInt <- log(reha_final$age+1) * reha_final$age
+reha_final$logreha_idInt <- log(reha_final$reha_id+1) * reha_final$reha_id
+reha_final$logelix_sumInt <- log(reha_final$elix_sum+1) * reha_final$elix_sum
+reha_final$logndistinctATClevel2Int <- log(reha_final$ndistinctATClevel2+1) * reha_final$ndistinctATClevel2
+reha_final$logQWT_count_before_rehaInt <- log(reha_final$QWT_count_before_reha+1) * reha_final$QWT_count_before_reha
+reha_final$logINPAT_count_before_rehaInt <- log(reha_final$INPAT_count_before_reha+1) * reha_final$INPAT_count_before_reha
+
+
+
+outcomes <- c("unpl_drop")
+
+
+predictors <- "sex + STAATS_ANGE + MASSN_ART + emp.type + age + logageInt + reha_id + logreha_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + QWT_count_before_reha + logQWT_count_before_rehaInt + INPAT_count_before_reha + logINPAT_count_before_rehaInt"
+
+
+models <- list()
+
+# Schleife, um 1 Modell je Outcome zu fitten
+for (outcome in outcomes) {
+  formula <- as.formula(paste(outcome, "~", predictors))
+  models[[outcome]] <- glm(formula, data = reha_final, family = binomial(link = "logit"))
+  cat("\n\n", outcome, "\n")
+  print(summary(models[[outcome]]))
+}
+
+```
+
+-> keine Verletzungen der Linearitätsannahme
+
 #Logistische Modelle
 
 ```{r log_models}
