@@ -810,7 +810,85 @@ boxplot(final_data$QWT_count_before_INPAT)
 cutoff_QWT_count_before_INPAT <- quantile(final_data$QWT_count_before_INPAT, 0.75) + 3*IQR(final_data$QWT_count_before_INPAT)
 cutoff_QWT_count_before_INPAT
 ```
+## Linearer Zusammenhang mit Logit des Outcomes
 
+Der Zusammenhang zwischen Prädiktoren und der abhängiggen Variablen irreguläre Beendigung der Behandlung soll mittels logistischen Regressionsmodellen geschätzt werden. Dafür muss zunächst die Modellannahme geprüft werden, dass ein linearer Zusammenhang zwischen metrischen Prädikoren und dem Logit des Outcomes besteht. Um diese Annahme zu testen, werden die logistischen Regressionsmodelle geschätzt und zusätzliche Prädiktoren inkludiert, die die Interkation zwischen dem jeweiligen metrischen Prädiktor und deren Logarithmus darstellen (Hosmer & Lemeshow, 1989).
+Relevant ist nur, ob die Interaktionstermine signifikant sind. Jede signifikante Interaktion deutet darauf hin, dass der jeweilige Haupteffekt die Annahme der Linearität im Logit verletzt. 
+
+```{r linearity_test}
+# Erstellen der Interaktionsterme der metrischen Prädiktoren mit ihrem Logarithmus
+final_data$logageInt <- log(final_data$age+1) * final_data$age
+final_data$loginpat_idInt <- log(final_data$inpat_id+1) * final_data$inpat_id
+final_data$logelix_sumInt <- log(final_data$elix_sum+1) * final_data$elix_sum
+final_data$logndistinctATClevel2Int <- log(final_data$ndistinctATClevel2+1) * final_data$ndistinctATClevel2
+final_data$logQWT_count_before_INPATInt <- log(final_data$QWT_count_before_INPAT+1) * final_data$QWT_count_before_INPAT
+final_data$logREHA_count_before_INPATInt <- log(final_data$REHA_count_before_INPAT+1) * final_data$REHA_count_before_INPAT
+
+
+
+outcomes <- c("unpl_drop")
+
+
+predictors <- "sex + nationality + emp.type + age + fost.degree_bin + logageInt + inpat_id + loginpat_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + QWT_count_before_INPAT + logQWT_count_before_INPATInt + REHA_count_before_INPAT + logREHA_count_before_INPATInt"
+
+
+models <- list()
+
+# Schleife, um 1 Modell je Outcome zu fitten
+for (outcome in outcomes) {
+  formula <- as.formula(paste(outcome, "~", predictors))
+  models[[outcome]] <- glm(formula, data = final_data, family = binomial(link = "logit"))
+  cat("\n\n", outcome, "\n")
+  print(summary(models[[outcome]]))
+}
+
+```
+
+Linearitätsannahme ist nur für elix_sum verletzt, da signifikante Interaktion. 
+
+# ```{r check_log_transformation}
+# 
+# 
+# data_test <- final_data %>%
+#   mutate(bin = cut(elix_sum, breaks = 10)) %>%
+#   group_by(bin) %>%
+#   summarise(
+#     mean_pred = mean(elix_sum, na.rm = TRUE),
+#     p = mean(as.numeric(unpl_drop), na.rm = TRUE),
+#     logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit-Transformation mit Laplace-Korrektur (falls p = 0 oder p = 1)
+#     n = n()
+#   )
+# 
+# ggplot(data_test, aes(x = mean_pred, y = logit_p)) +
+#   geom_point() +
+#   geom_smooth(method = "loess", color = "red", se = FALSE) +
+#   geom_text(aes(label = n), hjust = 0, vjust = 0) +
+#   labs(
+#     title = "Überprüfung der log-linearen Beziehung: elix_sum für unpl_drop",
+#     x = "Prädiktor elix_sum",
+#     y = "Logit(P(Y=1))"
+#   )
+
+#```
+<!-- Logarithmische Transformation scheitn ungeeignet, daher wird hier kategorisiert.  -->
+
+<!-- ```{r categorize_elix}   -->
+<!-- #tertile limits -->
+<!-- tertile_limits_e <- quantile(final_data$elix_sum[final_data$elix_sum > 0], probs = c(0.33, 0.66)) -->
+
+<!-- final_data <- final_data %>% mutate( -->
+<!--   elix_sum_cat = case_when( -->
+<!--     elix_sum == 0 ~ "0", -->
+<!--     elix_sum <= tertile_limits_e[1] ~ "1-2", -->
+<!--     elix_sum <= tertile_limits_e[2] ~ "3", -->
+<!--     TRUE ~ "4+" -->
+<!--   ) %>% factor(levels = c("0", "1-2", "3", "4+")) -->
+<!-- ) -->
+
+<!-- # Check -->
+<!-- table(final_data$elix_sum_cat, final_data$elix_sum, useNA = "always") -->
+<!-- table(final_data$elix_sum_cat) -->
+<!-- ``` -->
 ## Multicollinearity
 
 ```{r multicollinearity}
@@ -1026,6 +1104,10 @@ random_effects_var <- as.numeric(VarCorr(best_model)$pragmaid[1])
 ICC <- random_effects_var / (random_effects_var + residual_var)
 print(ICC) #.173
 performance::icc(best_model) #etwa 17% der outcomevarianz wird durch unterschiede in den gruppen (pragmaID) erklärt
+
+anova(model1, best_model, test = "Chisq") 
+
+
 ```
 ## Odds Ratios of significant predictors
 ```{r odds_ratios}
@@ -1191,12 +1273,6 @@ Keine Anzeichen von Überdispersion (Dispersionstest nicht signifikant).
 Keine Ausreißer (Outlier-Test p = 1).
 Visuell zeigen die Residuen keine systematischen Muster.
 
-```{r check_linearity}
-
-# ASSUMPTIONS:
-#Linearity: Linear relationship between continuous variables and the logit transformation of the outcome variable. 
-# not necessary as the DHARMa residual plot (Residualwerte (y-Achse) gegen die vorhergesagten Werte (x-Achse)) looks fine
-```
 
 # Fallzahlen
 ```{r sample_size}
