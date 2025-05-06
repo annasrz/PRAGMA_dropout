@@ -1,18 +1,23 @@
 ---
-title: "QWT_dropout"
+title: "QEB_dropout"
 author: "Anna"
-date: "2024-06-18"
+date: "2024-08-07"
 output: 
   html_document:
     code_folding: hide
 ---
+
+# Einflussfaktoren für eine irreguläre Beendigung einer Qualifizierten Entzugsbehandlung (QEB)
+
+
+Bei QEB handelt es sich um einen stationärer Krankenhausaufenthalt mit einer Hauptdiagnose F10.2, F10.3 oder F10.4 oder einer Hauptdiagnose F10.x in Kombination mit einer sekundären Diagnose F10.2, zusätzlich zu den OPS-Codes 8-985 oder 9-647. Im Vergleich zu einer "stationären Alkoholbehandlung" (SAB) stellt QEB eine umfassendere Alkoholbehandlung dar, die zusätzlich zur medizinischen Intervention psychosoziale Therapieelemente beinhaltet. 
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 options(warn = -1)
 ```
 
-# Vorbereitungen
+## Set Up
 
 ```{r essentials}
 # clean workspace
@@ -30,9 +35,6 @@ invisible(lapply(packages, library, character.only = TRUE))
 # current date:
 DATE <- format(Sys.Date(), "%Y%m%d")
 
-# themes and options
-options(scipen = 999)
-
 # output folders
 folder_table <- file.path("..", "output/tables")
 folder_plot <- file.path("..", "output/figures")
@@ -46,7 +48,7 @@ if (!file.exists(folder_plot)) {
 }
 ```
 
-# Daten Import
+## Daten Import
 
 ```{r data_import}
 print(getwd())
@@ -54,7 +56,7 @@ datapath <- file.path("..", "input")
 #read in all RDS-files in datapath 
 filenames <- list.files(datapath, pattern = "\\.rds$", full.names = T)
 
-names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "inpat_OPS", "inpat", "qwt_OPS", "qwt", "reha", "reha_new")
+names <- c("pragma_id_GKV", "all_diagnoses", "medications", "employment", "fosterage", "income", "insurance_periods", "SAB_OPS", "SAB", "QEB_OPS", "QEB", "reha", "reha_new")
 
 if (length(filenames) != length(names)) {
   stop("Die Anzahl der Dateien stimmt nicht mit Anzahl names überein.")
@@ -67,81 +69,99 @@ print(names(ldf))
 list2env(ldf, envir = .GlobalEnv) #save all dataframes in global environment as dataframes
 ```
 
-# Daten vorbereiten
+## Daten vorbereiten
 
-## Daten Struktur
+### Daten Struktur
 ```{r data_structure}
 
-#convert pragmaid to factor in all dataframes
+# convert pragmaid to factor in all dataframes
 # harmonise column names
 
 ldf <- lapply(names(ldf), function(df_name) {
   df <- ldf[[df_name]]
   
-  # pragmaid in Faktor umwandeln, falls vorhanden
   if ("pragmaid" %in% colnames(df)) {
     df <- df %>%
       mutate(pragmaid = as.factor(pragmaid))
   }
   
-  if (df_name %in% c("reha_new", "reha", "inpat", "qwt")) {
+  if (df_name %in% c("reha_new", "reha", "SAB", "QEB")) {
     
     date_columns <- grep("^date\\.(inpat|qwt|drvreha|reha)\\.(start|end)$", colnames(df), value = TRUE)
     
-    # Wenn solche Spalten existieren, benenne sie um
     if (length(date_columns) > 0) {
-      # Ersetze "date.[irgendwas]" durch "date.treat"
       new_names <- gsub("^date\\..*\\.", "date.treat.", date_columns)
       df <- df %>%
         rename_with(~ new_names, all_of(date_columns))
       
-      treatment_types <- gsub("^date\\.(.*)\\..*$", "\\1", date_columns)  # Extrahiere den Mittelteil
+      treatment_types <- gsub("^date\\.(.*)\\..*$", "\\1", date_columns)  
       unique_treatments <- unique(treatment_types)
       print(treatment_types)
       df <- df %>%
-        mutate(treatment = factor(unique_treatments[1]))  # Füge die Spalte treatment hinzu
+        mutate(treatment = factor(unique_treatments[1])) 
     }
+  }
+    
+      # rename SAB_id to SAB_id
+      if ("inpat_id" %in% colnames(df)) {
+        df <- df %>%
+          rename(SAB_id = inpat_id)
+      }
+      
+      # rename QEB_id to QEB_id
+      if ("qwt_id" %in% colnames(df)) {
+        df <- df %>%
+          rename(QEB_id = qwt_id)
+      }
+
+  # mutate values in treatment column (SAB -> SAB, QEB -> QEB)
+  if ("treatment" %in% colnames(df)) {
+    df <- df %>%
+      mutate(treatment = case_when(
+        as.character(treatment) == "inpat" ~ "SAB",
+        as.character(treatment) == "qwt" ~ "QEB",
+        TRUE ~ as.character(treatment)
+      )) %>%
+      mutate(treatment = factor(treatment))
   }
   
   return(df)
 })
 
-# Überprüfen der Struktur von ldf, um sicherzustellen, dass die Namen korrekt sind
+# Check the structure of ldf to ensure that the names are correct
 str(ldf)
 names(ldf) <- names[1:length(ldf)]
 
 list2env(ldf, envir = .GlobalEnv)
 
-
-qwt <- qwt %>% 
+QEB <- QEB %>% 
   mutate(n.days = as.integer(difftime(as.Date(date.treat.end), as.Date(date.treat.start), units = "days")) + 1)
-
-
 ```
 
-# Check Zeiträume
+### Check der Behandlungszeiträume
 
 ## Direkte Anschlüsse identifizieren
 ```{r check_immconsec}
 
-## DIREKTE ANSCHLÜSSE
-#wenn sich ein treatment direkt an das vorangehende treatment anschließt, sollen beide zusammengefasst werden
+# DIRECT CONNECTIONS
+# If a QEB is directly connected to the preceding QEB, both should be summarised
 
-qwt <- qwt %>%
+QEB <- QEB %>%
   arrange(pragmaid, date.treat.start) %>%
   group_by(pragmaid) %>%
   mutate(
-    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #das Startdatum ist gleich dem Enddatum oder es ist um einen Tag versetzt
+    direkter_anschluss = (date.treat.start == lag(date.treat.end, default = NULL)) | (date.treat.start == lag(date.treat.end, default = NULL) + 1)) #the start date is the same as the end date or it is offset by one day
 
-table(qwt$direkter_anschluss, useNA = "always") #52
+table(QEB$direkter_anschluss, useNA = "always")
 
-#check -> okay
-qwt %>% arrange(pragmaid, date.treat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.treat.start, date.treat.end)
+#check
+QEB %>% arrange(pragmaid, date.treat.start) %>% filter(direkter_anschluss | lead(direkter_anschluss)) %>% select(pragmaid, date.treat.start, date.treat.end)
 ```
 
-## Optional: direkte anschlüsse zu einem treatment zusammenfassen
+Direkte Anschlüsse zu einem treatment zusammenfassen
+
 ```{r combine_consectreatments}
-qwt <- qwt %>% 
+QEB <- QEB %>% 
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
   mutate(
@@ -150,28 +170,27 @@ qwt <- qwt %>%
       TRUE ~ date.treat.start
     )
   ) %>%
-  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  #Behalte nur diejenigen Zeilen, bei denen `direkter_anschluss` des nächsten Datensatzes FALSE ist
+  filter(is.na(lead(direkter_anschluss)) | !lead(direkter_anschluss)) %>%  # keep only those rows where `direkter_anschluss` of the next row is FALSE
   ungroup()
 ```
 
-
-## any OVERLAPS between treatments within pragmaid?
+Gibt es Überlappungen in den Behandlungszeiträumen innerhalb einer Person?
 
 ```{r check_overlaps}
-qwt$overlap <- FALSE
+QEB$overlap <- FALSE
 
-qwt <- qwt %>%
+QEB <- QEB %>%
   group_by(pragmaid) %>%
   mutate(overlap = sapply(1:n(), function(i) {
     any(date.treat.start[i] < date.treat.end[-i] & date.treat.end[i] > date.treat.start[-i])
   }))
 
-table(qwt$overlap, useNA = "always") #27 cases with overlap
+table(QEB$overlap, useNA = "always") 
 
-overlapping_IDs <- qwt %>% filter(overlap == TRUE) %>% pull(pragmaid) %>% unique()
+overlapping_IDs <- QEB %>% filter(overlap == TRUE) %>% pull(pragmaid) %>% unique()
 
 # Plot erstellen, um Überlappungen zu visualisieren
-ggplot(qwt %>% filter(pragmaid %in% overlapping_IDs), 
+ggplot(QEB %>% filter(pragmaid %in% overlapping_IDs), 
        aes(y = pragmaid)) +
   geom_segment(aes(x = date.treat.start, 
                    xend = date.treat.end, 
@@ -183,10 +202,10 @@ ggplot(qwt %>% filter(pragmaid %in% overlapping_IDs),
   theme_minimal() #some overlaps are not visible, as they are very short (1 day)
 ``` 
 
-## Optional: remove overlapping treatments
+## Overlaps in Behandlungen entfernen
 ```{r remove_overlaps}
-# remove overlapping treatments -> keep only the longest treatment
-cases_to_remove <- qwt %>% 
+# keep only the longest treatment when there are overlaps
+cases_to_remove <- QEB %>% 
   filter(overlap == TRUE) %>%
   group_by(pragmaid) %>%
   arrange(pragmaid, date.treat.start) %>%
@@ -194,40 +213,39 @@ cases_to_remove <- qwt %>%
       coalesce( #if the previous treatment is not overlapping with the current treatment, start a new group
         as.logical(date.treat.start > lag(date.treat.end, n = 1, default = first(date.treat.start)) &
                    date.treat.start > lag(date.treat.end, n = 2, default = first(date.treat.start)) &
-                   date.treat.start > lag(date.treat.end, n = 3, default = first(date.treat.start)) #Wenn alle Bedingungen erfüllt sind, bedeutet das, dass die aktuelle Behandlung nicht mit den vorherigen drei Behandlungen überlappt -> neuer Gruppenindex
+                   date.treat.start > lag(date.treat.end, n = 3, default = first(date.treat.start)) # if all conditions are met, this means that the current treatment does not overlap with the previous three treatments -> new group index
         ), TRUE 
       ))) %>%
   group_by(pragmaid, group_overlap) %>%
   mutate(
     max_n_days = max(n.days),  # Maximalwert pro Gruppe berechnen
     keep = case_when(
-      n.days == max_n_days & row_number() == which.max(n.days) ~ TRUE,  # Behalte die erste Zeile mit max_n_days
-      n.days == max_n_days ~ FALSE,                                   # Andere mit max_n_days auf FALSE setzen
-      TRUE ~ FALSE                                                    # Kleinere Werte ebenfalls auf FALSE
+      n.days == max_n_days & row_number() == which.max(n.days) ~ TRUE,  # keep the first row with max_n_days
+      n.days == max_n_days ~ FALSE,                                   # set others with max_n_days to FALSE
+      TRUE ~ FALSE                                                    # smaller values also set to FALSE
     )
   ) 
   
 cases_to_remove %>% arrange(pragmaid, date.treat.start) %>% select(pragmaid, date.treat.start, date.treat.end, n.days, ENTL301, overlap, group_overlap, keep, max_n_days)
 
-#common columns in cases_to_remove and qwt
-common_cols <- intersect(names(cases_to_remove), names(qwt))
+#common columns in cases_to_remove and QEB
+common_cols <- intersect(names(cases_to_remove), names(QEB))
 
 sum(cases_to_remove$keep == FALSE)
 
-#qwt: remove cases with keep == FALSE 
-qwt <- qwt %>% 
+#QEB: remove cases with keep == FALSE 
+QEB <- QEB %>% 
   left_join(cases_to_remove, by = common_cols) %>%
   filter(is.na(keep) | keep == TRUE) %>%
   select(-c(overlap, group_overlap, keep, direkter_anschluss, max_n_days))
 
 ```
 
-# Outcome Variablen Definition 
+## Definition "irreguläre Beendigung" mittels ENTLASS301
 
-## ENTLASS301
 ```{r recode_ENTL}
-table(qwt$ENTL301)
-str(qwt$ENTL301)
+table(QEB$ENTL301)
+str(QEB$ENTL301)
 
 labels_entl301 <- c(
   "1" = "regulär",
@@ -245,9 +263,10 @@ labels_entl301 <- c(
   "22" = "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."
 )
 
-qwt$ENTL301 <- factor(qwt$ENTL301, levels = names(labels_entl301), labels = labels_entl301)
+QEB$ENTL301 <- factor(QEB$ENTL301, levels = names(labels_entl301), labels = labels_entl301)
 
-qwt <- qwt %>% 
+# Categorisation of ENTLASS reasons into ‘irregular termination’ (1 = yes; 2 = no) (1 = ja; 2 = nein)
+QEB <- QEB %>% 
   filter(ENTL301 != "Tod") %>%
   mutate(unpl_drop = factor(case_when(
   ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
@@ -255,27 +274,26 @@ qwt <- qwt %>%
                  "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
   TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
 
-table(qwt$ENTL301, useNA = "always")
-table(qwt$unpl_drop, useNA = "always")
+table(QEB$ENTL301, useNA = "always")
+table(QEB$unpl_drop, useNA = "always")
 
 
 #Fallzahl
-qwt %>% summarise(n = n(), npragmaid = n_distinct(pragmaid))
+QEB %>% summarise(n = n(), npragmaid = n_distinct(pragmaid))
 ```
 
 ## Validierung der ENTLASS301 Variable an Behandlungsdauer
 
 ```{r check_ENTL301}
-prop.table(table(qwt$ENTL301))
-
-ggplot(qwt, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
+prop.table(table(QEB$ENTL301))
+ggplot(QEB, aes(x = ENTL301)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
 
 ```
 
 ```{r ENTL301_ndays_dist}
 desired_order_ENTL301 <- c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung", "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.", "regulär") 
 
-qwt <- qwt %>% mutate(ENTL301 = factor(ENTL301, levels = desired_order_ENTL301))
+QEB <- QEB %>% mutate(ENTL301 = factor(ENTL301, levels = desired_order_ENTL301))
 
 label_mapping <- c(
   "aus sonstigen Gründen beendet" = "aus sonstigen Gründen beendet",
@@ -292,117 +310,73 @@ label_mapping <- c(
   "regulär" = "regulär")
 
 
-ENTL_ndays <- ggplot(qwt %>% filter (ENTL301 != "Tod"), aes(x = n.days, y = ENTL301, fill = unpl_drop)) + 
+ENTL_ndays <- ggplot(QEB %>% filter (ENTL301 != "Tod"), aes(x = n.days, y = ENTL301, fill = unpl_drop)) + 
   geom_jitter(alpha=0.1, size = rel(0.8)) +
   geom_boxplot(width = 0.3, outlier.shape = NA) +
   scale_x_continuous(breaks = seq(0, 100, by = 2)) +
   scale_y_discrete(labels = label_mapping) +
   #change y axis label
   ylab("Entlassungsgrund (ENTL301)") +
-  xlab("Anzahl Tage in QE") +
-  #change legend title
-  labs(title = "Dauer eines Qualifizierten Entzugs nach Entlassungsgrund", subtitle = "n = 3758 Behandlungen", caption = "Anmerk.: Datenpunkte markieren einzelne Behandlungen") +
+  xlab("Anzahl Tage in QEB") +
   theme_minimal() +
     theme(
     legend.position = "none",
     panel.grid.major.y = element_blank(),
     panel.grid.minor.y = element_blank(),
-    plot.title = element_text(size = 16, face = "bold"),  # Titel größer und fett
-    plot.subtitle = element_text(size = 14, face = "italic"),  # Untertitel in Kursivschrift
-    axis.title = element_text(size = 16),  # Achsentitel etwas größer
-    axis.text = element_text(size = 14),  # Achsentext leserlich machen
-    plot.caption = element_text(size = 10)  # Beschriftung kleiner, aber lesbar
+    plot.title = element_text(size = 16, face = "bold"), 
+    plot.subtitle = element_text(size = 14, face = "italic"),  
+    axis.title = element_text(size = 16),  
+    axis.text = element_text(size = 14), 
+    plot.caption = element_text(size = 10),
+    plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
   )
   
 
 ENTL_ndays
-graph2doc(x = ENTL_ndays, file=file.path(folder_plot, "ENTL_ndays.png"), width=12, height=7)
-ggsave(file.path(folder_plot, "ENTL_ndays.png"), ENTL_ndays, width = 10, height = 6)
 
-#calculate IQR for n.days only among regulär beendeten Behandlungen
-qwt %>% 
+ggsave(file.path(folder_plot, "ENTL_ndays.tif"), ENTL_ndays, width = 12, height = 7, dpi = 700)
+
+#calculate IQR for n.days only among regular discharges
+QEB %>% 
   filter(ENTL301 == "regulär") %>%
   summarise(q25 = quantile(n.days, 0.25), q75 = quantile(n.days, 0.75), iqr = IQR(n.days), min = min(n.days), max = max(n.days))
 
 ```
 
-Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur sehr kurz dauern. Außerdem gibt es eine zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche, obwohl eigentlich 21 Tage empfohlen werden. Die ENTL301-Variable scheint daher kein idealer Indikator für einen unplanmäßigen Behandlungsabbruch zu sein.
+Die Variable ENTL301 gibt den Entlassungsgrund an. Die meisten Behandlungen werden regulär beendet, wobei auffällig ist, dass es unter diesen viele Behandlungen gibt, die nur sehr kurz dauern. Außerdem gibt es eine zweigipfelige Verteilung der Behandlungsdauer bei den regulär beendeten Behandlungen mit einem Peak um eine Woche, obwohl laut Leitlinie eigentlich 21 Tage empfohlen werden. Dennoch ist die mittlere Behandlungsdauer regulärer Entlassungen deutlich längerer als bei den irregulären Entlassungen.
 
-Als alternative Operationalisierung der AV Behandlungserfolg (vorher: unplanmäßger Beendigung) des Aufenthalts ziehen wir daher stattdessen die Anzahl der Tage in Behandlung an. Die Behandlungsdauer teilen wir in drei Gruppen ein: 0-6 Tage (unter Mindestaufenthalt), 7-20 Tage (Mindestaufenthalt absolviert, aber unter empfohlener Dauer) und 21+ Tage (empfohlene Dauer). 
+## Definition der Prädiktoren
 
-## Behandlungsdauer als AV
-
-```{r create vars}
-
-# 3-stufige AV
-qwt <- qwt %>%
-  filter(ENTL301 != "Tod") %>%
-  mutate(treat_dur_cat = factor(case_when(
-  #more than or 20 days in treatment
-  n.days >= 21 ~ 3,
-  #between 7 and 19 days (inclusive)
-  n.days >= 7 & n.days < 21 ~ 2,
-  #between 0 and 6 days (inclusive)
-  n.days >= 0 & n.days < 7 ~ 1,
-  TRUE ~ NA_real_), levels = c(1, 2, 3), labels = c("1-6 Tage","7-20 Tage", "21+ Tage")))
-
-# 2-stufige AV
-#qwt <- qwt %>%
-#  mutate(treat_dur_bin = factor(case_when(
-  #more than or 20 days in treatment
-#  n.days >= 21 ~ 2,
-  #below 20 days (inclusive)
-#  n.days < 21 ~ 1,
-#  TRUE ~ NA_real_), levels = c(1, 2), labels = c("unter 21 Tage", "21+ Tage")))
-
-```
-
-### Verteilung der neuen AV
-```{r check_treat_dur}
-ggplot(qwt, aes(x = treat_dur_cat)) + geom_bar() + theme(axis.text.x = element_text(angle = 25, hjust = 1))
-
-ggplot(qwt, aes(x = n.days)) +
-  geom_histogram(binwidth = 1) +
-  scale_x_continuous(limits = c(0, 30), breaks = seq(0, 30, by = 2), labels = seq(0, 30, by = 2)) 
-#  scale_x_continuous(limits = c(0, 27)) 
-
-```
-
-
-# Prädiktoren
-
-## Validierung qwt_id
-```{r check_qwt_id}
-# does the qwt_id increases with increasing date.treat.start?
-qwt_check <- qwt %>% 
+### QEB_id (Behandlungserfahrung QEB)
+```{r check_QEB_id}
+# does the QEB_id increases with increasing date.treat.start?
+QEB_check <- QEB %>% 
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(qwt_id_check = row_number()) %>%
-  select(pragmaid, qwt_id, qwt_id_check, date.treat.start, date.treat.end) #qwt_id does not increase with increasing date.treat.start. therefore, replace qwt_id with qwt_id_check
+  mutate(QEB_id_check = row_number()) %>%
+  select(pragmaid, QEB_id, QEB_id_check, date.treat.start, date.treat.end) #QEB_id was unordered before. therefore, replace QEB_id with QEB_id_check
 
-#replace qwt_id with qwt_id_check
-qwt <- qwt %>% 
+#replace QEB_id with QEB_id_check
+QEB <- QEB %>% 
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(qwt_id = row_number() - 1) %>% # Start at 0 to align with the REHA_count_before_qwt and INPAT_count_before_qwt variables, 
+  mutate(QEB_id = row_number() - 1) %>% # Start at 0 to align with the REHA_count_before_QEB and SAB_count_before_QEB variables, 
 # as they represent the number of treatments *before* the current one.
   ungroup()
 ```
 
-## Hinzufügen von REHA ID (wie viele REHAs hat eine Person zum Zeitpunkt des QWT bereits gemacht?)
+### Hinzufügen von REHA ID (wie viele REHAs hat eine Person zum Zeitpunkt des QEB bereits gemacht?)
 
-```{r qwt count}
+```{r QEB count}
 
-#Daten zusammenführen (mit reha statt der reha_new Daten, da in den reha daten sowohl GKV als auch DRV vorhanden sind)
+QEB_reha <- bind_rows(
+  QEB, reha %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
-qwt_reha <- bind_rows(
-  qwt, reha %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
-
-qwt_reha <- qwt_reha %>%
+QEB_reha <- QEB_reha %>%
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(REHA_count_before_qwt = sapply(1:n(), function(i) {
-    if (treatment[i] == "qwt") {
+  mutate(REHA_count_before_QEB = sapply(1:n(), function(i) {
+    if (treatment[i] == "QEB") {
       sum(treatment[1:(i-1)] == "reha" & date.treat.end[1:(i-1)] <= date.treat.start[i])
     } else {
       NA
@@ -410,48 +384,48 @@ qwt_reha <- qwt_reha %>%
   }))
 
 #check
-qwt_reha %>% select(pragmaid, date.treat.start, date.treat.end, qwt_id, treatment, REHA_count_before_qwt) %>% arrange(pragmaid, date.treat.start) #looks not okay for some cases, but this is due to overlaps in the data, e.g. 0BudrwOpY8 had a qwt while on reha-treatment?
+QEB_reha %>% select(pragmaid, date.treat.start, date.treat.end, QEB_id, treatment, REHA_count_before_QEB) %>% arrange(pragmaid, date.treat.start)
 
-qwt_reha <- qwt_reha %>% filter(treatment == "qwt")
+QEB_reha <- QEB_reha %>% filter(treatment == "QEB")
 
 ```
 
-## Hinzufügen von INPAT ID (wie viele INPATs hat eine Person zum Zeitpunkt des QWT bereits gemacht?)
+### Hinzufügen von SAB ID (wie viele SABs hat eine Person zum Zeitpunkt des QEB bereits gemacht?)
 
-```{r inpat count}
-qwt_reha_inpat <- bind_rows(qwt_reha, inpat %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
+```{r SAB count}
+QEB_reha_SAB <- bind_rows(QEB_reha, SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
-qwt_reha_inpat <- qwt_reha_inpat %>%
+QEB_reha_SAB <- QEB_reha_SAB %>%
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(INPAT_count_before_qwt = sapply(1:n(), function(i) {
-    if (treatment[i] == "qwt") {
-      sum(treatment[1:(i-1)] == "inpat" & date.treat.end[1:(i-1)] < date.treat.start[i])
+  mutate(SAB_count_before_QEB = sapply(1:n(), function(i) {
+    if (treatment[i] == "QEB") {
+      sum(treatment[1:(i-1)] == "SAB" & date.treat.end[1:(i-1)] < date.treat.start[i])
     } else {
       NA
     }
   }))
 
 #check
-qwt_reha_inpat %>% select(pragmaid, date.treat.start, qwt_id, treatment, REHA_count_before_qwt, INPAT_count_before_qwt, REHA_count_before_qwt) %>% arrange(pragmaid, date.treat.start) #okay
+QEB_reha_SAB %>% select(pragmaid, date.treat.start, QEB_id, treatment, REHA_count_before_QEB, SAB_count_before_QEB, REHA_count_before_QEB) %>% arrange(pragmaid, date.treat.start) 
 
-qwt_reha_inpat <- qwt_reha_inpat %>% filter(treatment == "qwt")
+QEB_reha_SAB <- QEB_reha_SAB %>% filter(treatment == "QEB")
 
 ```
 
 
 
-## Hinzufügen der Stammdaten - SEX, AGE and nationality
+### Hinzufügen der Stammdaten - SEX, AGE and nationality
 
 ```{r add_stammdaten}
-#match pragma_id_GKV with qwt based on pragma_id (only columns names sex and yob)
-total_stamm <- left_join(qwt_reha_inpat, pragma_id_GKV, by="pragmaid")
+#match pragma_id_GKV with QEB based on pragma_id (only columns names sex and yob)
+total_stamm <- left_join(QEB_reha_SAB, pragma_id_GKV, by="pragmaid")
 
 total_stamm <- total_stamm %>% 
   select(c(-hivid, -gkv.id, -dak.id, -aok.id, - gkv.y)) %>%
   mutate(age = as.integer(substr(date.treat.start, 1, 4)) - yob) %>%
   rename(gkv = gkv.x)
-#4 patients with gkv aokdak (aokdak values are only present in the stamm data, but not in the qwt data, keep only gkv from qwt data)
+#4 patients with gkv aokdak (aokdak values are only present in the stamm data, but not in the QEB data, keep only gkv from QEB data)
 
 total_stamm$pragmaid <- factor(total_stamm$pragmaid)
 
@@ -459,15 +433,16 @@ table(total_stamm$sex, useNA = "always")
 table(total_stamm$gkv, useNA = "always")
 ```
 
-## Hinzufügen Emplyoment Status
+### Hinzufügen Emplyoment Status
 
 ```{r add_employment}
-nrow(distinct(total_stamm, pragmaid, qwt_id)) #3857
+nrow(distinct(total_stamm, pragmaid, QEB_id)) #3857
 total_employ_all <- left_join(total_stamm, employment, by = "pragmaid")
 
-# Filtern der Zeilen, sodass qwt_start innerhalb des Zeitraums von employ_start und employ_end liegt
+# Filter rows so that QEB_start is within the period of employ_start and employ_end
 total_employ <- total_employ_all %>%
   filter(date.treat.start >= date.emp.start & date.treat.start <= date.emp.end)
+
 #do gkv.x and gkv.y have the same values?
 sum(total_employ$gkv.x != total_employ$gkv.y) #0 -> gkv.x and gkv.y have the same values, delete gkv.y and rename gkv.x to gkv
 total_employ <- total_employ %>% 
@@ -477,16 +452,17 @@ total_employ <- total_employ %>%
 nrow(total_employ) - nrow(total_stamm) 
 #after filtering, there are 41 rows less than before
 missing_rows <- total_stamm %>%
-  anti_join(total_employ, by = c("pragmaid", "date.treat.start", "date.treat.end")) #für 41 Zeilen gibt es keine employment Daten (-> Lücken in den Daten, siehe unten), diese werden zT exkludiert (aktiver Versichertenstatus ist Inklusionskriterium)
+  anti_join(total_employ, by = c("pragmaid", "date.treat.start", "date.treat.end")) # there is no employment data for 41 rows (-> gaps in the data, see below), some of these are excluded (active insured status is an inclusion criterion)
 
 total_employ$emp.type <- as.factor(total_employ$emp.type)
 total_employ$sex <- as.factor(total_employ$sex)
 total_employ$nationality <- as.factor(total_employ$nationality)
 total_employ$ward <- as.factor(total_employ$ward)
 total_employ$source <- as.factor(total_employ$source)
-
 ```
-### Einschub: Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
+
+
+#### Einschub: Sind fehlende Daten für Employment auf Unterbrechungen in Versichertenzeiten zurückzuführen?
 ```{r check_missing_employment}
 #check if missing employment data is due to interruptions in insured periods
 check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) %>%
@@ -494,17 +470,18 @@ check_missing <- left_join(missing_rows, insurance_periods, by = c("pragmaid")) 
 
 sum(check_missing$gkv.x != check_missing$gkv.y) #0 -> gkv.x and gkv.y have the same values
 
-#filter cases where the inpat treatment is covered by insurance
-cases_with_valid_ins <- check_missing %>% filter(date.treat.start >= date.ins.start & date.treat.start <= date.ins.end) #there are 8 cases that do have insurance data for the inpatient treatment, but have no corresponding employment data. these cases should be kept in the inpat_employ dataset, as they are insured during the inpatient treatment and the employment status should be set to NA.
-
+#filter cases where the SAB treatment is covered by insurance
+cases_with_valid_ins <- check_missing %>% filter(date.treat.start >= date.ins.start & date.treat.start <= date.ins.end)
 # -> some, but not all cases with missing employment data are due to interruptions in insured periods
 
-#add cases with valid insurance to inpat_employ
+#add cases with valid insurance to SAB_employ
 total_employ <- bind_rows(total_employ, total_stamm %>% filter(pragmaid %in% cases_with_valid_ins$pragmaid & date.treat.start %in% cases_with_valid_ins$date.treat.start & date.treat.end %in% cases_with_valid_ins$date.treat.end))
 
-table(total_employ$emp.type, useNA = "always") # 7 NAs, so the 7 cases without employment infos, but with insurance are added to the total_employ dataset
+table(total_employ$emp.type, useNA = "always")
+
 ``` 
-## Hinzufügen von Diagnose-Daten
+
+### Hinzufügen von Diagnose-Daten
 
 ```{r add_diagnoses}
 sum(is.na(all_diagnoses$pragmaid)) #158
@@ -515,7 +492,7 @@ table(all_diagnoses$icd_type)
 diagnoses_filtered <- all_diagnoses %>% 
   filter(pragmaid %in% total_employ$pragmaid) %>% 
   filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
-  filter(icd.alc == FALSE) %>% #keep only diagnoses that are not alcohol related (as all inpat cases are alcohol related)
+  filter(icd.alc == FALSE) %>% #keep only diagnoses that are not alcohol related (as all SAB cases are alcohol related)
   mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
 
 
@@ -537,9 +514,9 @@ diagnoses_filtered %>%
 #delete length_diag
 diagnoses_filtered <- select(diagnoses_filtered, -length_diag)
 
-sum(is.na(diagnoses_filtered$date.diag.start)) #19
-sum(is.na(diagnoses_filtered$date.diag.end)) #8
-sum(is.na(diagnoses_filtered$setting)) #0
+sum(is.na(diagnoses_filtered$date.diag.start)) 
+sum(is.na(diagnoses_filtered$date.diag.end)) 
+sum(is.na(diagnoses_filtered$setting))
 
 #if date.diag.end is NA, set it to date.diag.start
 diagnoses_filtered <- diagnoses_filtered %>% 
@@ -548,14 +525,13 @@ diagnoses_filtered <- diagnoses_filtered %>%
 
 diagnoses_employ_alltimes <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid")) 
 
-nrow(distinct(diagnoses_employ_alltimes, pragmaid, qwt_id)) #3823 -> okay
+nrow(distinct(diagnoses_employ_alltimes, pragmaid, QEB_id)) 
 
 # keep only diagnoses in the timeframe of interest (maximum 2 quarters before treatment start)
 diagnoses_employ_fil <- diagnoses_employ_alltimes %>%
   filter(
-    #Ambulante Diagnosen (Dauer: 1 Quartal) dürfen nicht später zurückliegend als 2 Quartale vor QWT-Start gestellt worden sein und maximal gleich QWT-Start liegen
+    # outpatient diagnoses (duration: 1 quarter) must not have been made more than 2 quarters before the start of QEB and must not be later than the start of QEB
      date.diag.start >= (date.treat.start - days(180)) & date.diag.start <= date.treat.start)
-#Arbeitsdefinition, für stationäre Diagnosen (bzw. alle anderen settings) muss Eingrenzung noch angepasst werden
 
 # GKV X and Y are the same, delete Y and rename X to gkv
 sum(diagnoses_employ_fil$gkv.x != diagnoses_employ_fil$gkv.y) 
@@ -565,101 +541,67 @@ diagnoses_employ_fil <- diagnoses_employ_fil %>%
   rename(gkv = gkv.x)
 
 #checks
-nrow(distinct(diagnoses_employ_fil, pragmaid, qwt_id)) # 3802 (before: 3823 -> 21 cases are filtered out as they did not have a diagnosis in the timeframe of interest - they will be added in the end again
+nrow(distinct(diagnoses_employ_fil, pragmaid, QEB_id)) # 21 cases were excluded as they did not have a diagnosis in the timeframe of interest - they will be added in the end again
 
-# Charlson and Elixhauser Comorbidity Index
+# Elixhauser Comorbidity Index
 
-diagnoses_employ_fil$id_pragma_qwt <- paste(diagnoses_employ_fil$pragmaid, diagnoses_employ_fil$qwt_id, sep = "_")
+diagnoses_employ_fil$id_pragma_QEB <- paste(diagnoses_employ_fil$pragmaid, diagnoses_employ_fil$QEB_id, sep = "_")
 
-comorb_elix <- comorbidity::comorbidity(x=diagnoses_employ_fil, id = "id_pragma_qwt",
+comorb_elix <- comorbidity::comorbidity(x=diagnoses_employ_fil, id = "id_pragma_QEB",
                                 code = "icd",map="elixhauser_icd10_quan",
                                 assign0 = T,tidy.codes = T)
 
-comorb_char <- comorbidity::comorbidity(x=diagnoses_employ_fil, id = "id_pragma_qwt",
-                                code = "icd",map="charlson_icd10_quan",
-                                assign0 = T,tidy.codes = T)
 
 comorb_elix_sum <- comorb_elix %>%
-  #new column with row sums using all columns except the first one and "alcohol"
-  mutate(elix_sum = rowSums(select(., -id_pragma_qwt))) %>%
-  select(id_pragma_qwt, elix_sum)
+  #new column with row sums using all columns except the first one
+  mutate(elix_sum = rowSums(select(., -id_pragma_QEB))) %>%
+  select(id_pragma_QEB, elix_sum)
 
-comorb_char_sum <- comorb_char %>%
-  #new column with row sums using all columns except the first one and "alcohol"
-  mutate(char_sum = rowSums(select(., -id_pragma_qwt))) %>%
-  select(id_pragma_qwt, char_sum)
+nrow(distinct(total_employ, pragmaid, QEB_id)) - nrow(distinct(comorb_elix_sum, id_pragma_QEB))
 
-#bind both comorbidity dataframes
-comorb_sum <- left_join(comorb_elix_sum, comorb_char_sum, by = "id_pragma_qwt")
-      
+total_employ$id_pragma_QEB <- paste(total_employ$pragmaid, total_employ$QEB_id, sep = "_")
 
-nrow(distinct(total_employ, pragmaid, qwt_id)) - nrow(distinct(comorb_sum, id_pragma_qwt))
-# 21 cases, these have to be added to the comorb_sum dataset
-
-total_employ$id_pragma_qwt <- paste(total_employ$pragmaid, total_employ$qwt_id, sep = "_")
-
-diagnoses_employ <- left_join(total_employ, comorb_sum, by = "id_pragma_qwt")
+diagnoses_employ <- left_join(total_employ, comorb_elix_sum, by = "id_pragma_QEB")
 
 #are there missings? 
 nrow(total_employ) - nrow(diagnoses_employ) #0
 sum(is.na(diagnoses_employ$elix_sum)) #21 missings in n_diagnoses_woa
-sum(is.na(diagnoses_employ$char_sum)) #21 missings in n_diagnoses_wa
 
 #set NAs to 0
 diagnoses_employ <- diagnoses_employ %>% 
-  mutate(elix_sum = replace_na(elix_sum, 0),
-         char_sum = replace_na(char_sum, 0))
+  mutate(elix_sum = replace_na(elix_sum, 0))
 
 ```
 
-### Diagnose Daten Descriptives 
+#### Diagnose Daten Descriptives 
 
 ```{r check_ndiagnoses}
 #plot histogram of number of diagnoses
 ggplot(diagnoses_employ, aes(x = elix_sum)) + geom_histogram(binwidth = 1)
 summary(diagnoses_employ$elix_sum)
-ggplot(diagnoses_employ, aes(x = char_sum)) + geom_histogram(binwidth = 1)
-summary(diagnoses_employ$char_sum) 
 ```
-# Hinzufügen von Pflegegraden
+
+
+### Hinzufügen von Pflegegraden
 ```{r add_pflegegrad}
-str(fosterage)
 table(fosterage$fost.degree, useNA = "always")
-# sowohl Pflegegrade (PG) als auch Pflegestufen (PS). Pflegegrade sind ab 2017 gültig, Pflegestufen bis 2016. Wie Pflegestufen in Pflegegrade umrechnen?
-min(qwt$date.treat.start) #2015-12-11
+# sowohl Pflegegrade (PG) als auch Pflegestufen (PS). Pflegegrade sind ab 2017 gültig, Pflegestufen bis 2016.
 
-unique(qwt$date.treat.start) %>% sort() #5 QWTs wurden vor 2016 begonnen
-
-#Quelle: https://www.gkv-spitzenverband.de/media/dokumente/service_1/Pflegebegutachtung_2017_von_Pflegestufen_zu_Pflegegraden.pdf
-# ohne PEA funktioniert Umrechnung nicht eindeutig. Daher wird die Variable zu Pflegebedarf vorhanden/nicht vorhanden kodiert
-
-#conversion_table_PSPG <- c("PS0" = "PG2",
-#                      "PS1" = "PG2",
-#                      "PS2" = "PG3",
-#                      "PS3" = "PG4",
-#                      "PSH" = "PG5")
-
-#fosterage <- fosterage %>% 
-#  mutate(fost.degree = recode(fost.degree, !!!conversion_table))
-
-fost_qwt <- fosterage %>% 
+fost_QEB <- fosterage %>% 
   filter(pragmaid %in% diagnoses_employ$pragmaid)
 
 #checks
-sum(is.na(fost_qwt$date.fost.start)) #0
-sum(is.na(fost_qwt$pragmaid)) #0
-nrow(distinct(diagnoses_employ, pragmaid)) - nrow(distinct(fost_qwt, pragmaid))
-#1663 patients do not have fosterage data
-#248 patients have fosterage data
+sum(is.na(fost_QEB$date.fost.start)) #0
+sum(is.na(fost_QEB$pragmaid)) #0
+nrow(distinct(diagnoses_employ, pragmaid)) - nrow(distinct(fost_QEB, pragmaid)) # how many patients do have fosterage data?
 
-
-fost_diagnoses_employ_alltimes <- left_join(diagnoses_employ, fost_qwt, by = "pragmaid") 
+fost_diagnoses_employ_alltimes <- left_join(diagnoses_employ, fost_QEB, by = "pragmaid") 
 
 
 fost_diagnoses_employ_fil <- fost_diagnoses_employ_alltimes %>%
   filter((date.treat.start >= date.fost.start & is.na(date.fost.end)) | (date.treat.start >= date.fost.start & date.treat.start <= date.fost.end))
 
-nrow(distinct(fost_diagnoses_employ_fil, pragmaid)) #97 patients do have fosterage data that is within the QWT period
+nrow(distinct(fost_diagnoses_employ_fil, pragmaid)) # how many patients do have fosterage data within the QEB period?
 
 # GKV X - GKV Y
 sum(fost_diagnoses_employ_fil $gkv.x != fost_diagnoses_employ_fil $gkv.y) #0 -> gkv.x and gkv.y are the same, delete gkv.y and rename gkv.x to gkv
@@ -668,16 +610,11 @@ fost_diagnoses_employ_fil  <- fost_diagnoses_employ_fil  %>%
   rename(gkv = gkv.x) %>%
   ungroup()
 
-# check data that is filtered out
-#check_missing_fost <- total_fost_all %>% 
-#  anti_join(fost_diagnoses_employ_fil , by = c("pragmaid", "date.treat.start", "date.treat.end", "date.fost.start", "date.fost.end")) %>%
-#  select(pragmaid, date.treat.start, date.treat.end, date.fost.start, date.fost.end, fost.degree) # -> okay
-
 
 # add fost_diagnoses_employ_fil  to diagnoses_employ and set fosterage to NA if no fosterage data is available
 fost_diagnoses_employ <- diagnoses_employ %>%
   ungroup() %>%
-  left_join(fost_diagnoses_employ_fil  %>% select(id_pragma_qwt, fost.degree), by = "id_pragma_qwt") %>%
+  left_join(fost_diagnoses_employ_fil  %>% select(id_pragma_QEB, fost.degree), by = "id_pragma_QEB") %>%
   mutate(fost.degree_bin = as.factor(ifelse(is.na(fost.degree), "nein", "ja")))
 
 
@@ -686,28 +623,28 @@ table(fost_diagnoses_employ$fost.degree_bin, useNA = "always")
 
 ```
 
-## Hinzufügen von Medikation
+### Hinzufügen von Medikation
 
 ```{r add_medication}
 
-med_qwt <- medications %>% 
+med_QEB <- medications %>% 
   filter(pragmaid %in% fost_diagnoses_employ$pragmaid)
 
 #checks
-sum(is.na(med_qwt$date.medi.disp)) #0
-sum(is.na(med_qwt$pragmaid)) #0
-nrow(distinct(fost_diagnoses_employ, pragmaid)) - nrow(distinct(med_qwt, pragmaid)) #45 patients do not have medication data, 1866 have
+sum(is.na(med_QEB$date.medi.disp)) #0
+sum(is.na(med_QEB$pragmaid)) #0
+nrow(distinct(fost_diagnoses_employ, pragmaid)) - nrow(distinct(med_QEB, pragmaid)) 
 
-#add med_qwt to fost_diagnoses_employ
-med_fost_diagnoses_employ_alltimes <- left_join(fost_diagnoses_employ, med_qwt, by = "pragmaid")
-nrow(distinct(med_fost_diagnoses_employ_alltimes, pragmaid)) #1910 patients -> okay
+#add med_QEB to fost_diagnoses_employ
+med_fost_diagnoses_employ_alltimes <- left_join(fost_diagnoses_employ, med_QEB, by = "pragmaid")
+nrow(distinct(med_fost_diagnoses_employ_alltimes, pragmaid))
 
 med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_alltimes %>%
-# only keep medication data that happend during the 3 months before the QWT
+# only keep medication data that happend during the 3 months before the QEB
   filter(date.medi.disp >= (date.treat.start - days(30)) & date.medi.disp <= date.treat.start) %>%
   filter(ATC != "")
 
-nrow(distinct(med_fost_diagnoses_employ_fil, pragmaid, qwt_id)) # 1475 treatments have medication data in the timeframe of interest
+nrow(distinct(med_fost_diagnoses_employ_fil, pragmaid, QEB_id)) # 1475 treatments have medication data in the timeframe of interest
 
 #GKV X - GKV Y
 sum(med_fost_diagnoses_employ_fil$gkv.x != med_fost_diagnoses_employ_fil$gkv.y) #0 -> gkv.x and 
@@ -717,14 +654,10 @@ med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>%
   rename(gkv = gkv.x) %>%
   ungroup()
 
-#missing_med <- total_med_all %>% 
-#  anti_join(med_fost_diagnoses_employ_fil, by = c("pragmaid", "date.treat.start", "date.treat.end", "date.medi.disp")) %>%
-#  select(pragmaid, date.treat.start, date.treat.end, date.medi.disp) # -> okay
-#rm(missing_med)
 
 #new variable with level 2 ATCs (therapeutische Untergruppe)
 med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>%
-  group_by(id_pragma_qwt) %>%
+  group_by(id_pragma_QEB) %>%
   mutate(Level2_ATC = substr(ATC, 1, 3)) %>%
   ungroup()
 
@@ -732,51 +665,42 @@ med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>%
 unique_level2_ATCs <- unique(med_fost_diagnoses_employ_fil$Level2_ATC)
 length(unique_level2_ATCs) #64
 
-# welche Untergruppe ist am häufigsten vertreten?
+# which level2_ATC is the most frequent?
 sorted_atc_counts <- med_fost_diagnoses_employ_fil %>%
-  count(Level2_ATC, sort = TRUE) #Psycholeptika (N05) kommt am häufigsten vor
+  count(Level2_ATC, sort = TRUE) #Psycholeptika (N05) 
 
-#calculate sum of disting full ATC and level 2 ATC codes
+#calculate sum of distinct level 2 ATC codes per QEB-person combi
 med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>%
-  group_by(id_pragma_qwt) %>%
+  group_by(id_pragma_QEB) %>%
   dplyr::summarize(ndistinctATClevel2 = n_distinct(Level2_ATC), 
             ndistinctATC = n_distinct(ATC)) %>%
   ungroup()
 
 table(med_fost_diagnoses_employ_fil$ndistinctATClevel2)
 
-med_fost_diagnoses_employ <- left_join(fost_diagnoses_employ, med_fost_diagnoses_employ_fil, by = "id_pragma_qwt")
+med_fost_diagnoses_employ <- left_join(fost_diagnoses_employ, med_fost_diagnoses_employ_fil, by = "id_pragma_QEB")
 
 #set NAs in ndistinct to 0
 med_fost_diagnoses_employ <- med_fost_diagnoses_employ %>%
-  mutate(ndistinctATC = ifelse(is.na(ndistinctATC), 0, ndistinctATC)) %>%
-  mutate(ndistinctATClevel2 = ifelse(is.na(ndistinctATClevel2), 0, ndistinctATClevel2)) %>%
-  mutate(polymedi = as.factor(ifelse(ndistinctATC >= 6, "ja", "nein"))) %>%
-  mutate(polymedi_level2 = as.factor(ifelse(ndistinctATClevel2 >= 5, "ja", "nein")))
-
-summary(med_fost_diagnoses_employ$ndistinctATC)
-hist(med_fost_diagnoses_employ$ndistinctATC)
+  mutate(ndistinctATClevel2 = ifelse(is.na(ndistinctATClevel2), 0, ndistinctATClevel2)) 
 
 summary(med_fost_diagnoses_employ$ndistinctATClevel2)
 hist(med_fost_diagnoses_employ$ndistinctATClevel2)
-
-table(med_fost_diagnoses_employ$polymedi)
-table(med_fost_diagnoses_employ$polymedi_level2)
 ```
 
-# Auswahl relevanter Variablen
+## Auswahl relevanter Variablen
 ```{r select_vars}
 final_data <- med_fost_diagnoses_employ %>% 
-  select(-c(KH_FALL_ID, date.kkh.start, date.kkh.end, date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_qwt, fost.degree, source, icd.primary, icd.secondary, icd.admission, icd.other, died, date.death, ward))
+  select(-c(KH_FALL_ID, date.kkh.start, date.kkh.end, date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_QEB, fost.degree, source, icd.primary, icd.secondary, icd.admission, icd.other, died, date.death, ward, yob))
 ```
 
-# Centering variables
+## Zentrieren der kontinuierlichen Variablen
 
-Center all continuous variables (i.e., subtract the mean, so the mean = 0). The coefficients are then interpreted as the change in the log odds of the outcome for a one-unit increase in the predictor, while holding all other predictors at their mean values. The intercept represents the log odds of the outcome when all predictors are at their mean values.
+Alle kontinuierlichen Variablen werden zentriert (d. h. der Mittelwert subtrahiert, so dass der Mittelwert = 0 ist). Die Koeffizienten werden dann als die Veränderung der log odds der outcomes bei einer Erhöhung des Prädiktors um eine Einheit interpretiert, wobei alle anderen (kontinuierlichen) Prädiktoren auf ihren Mittelwerten gehalten werden. Der Intercept stellt die log odds des outcomes dar, wenn alle (kontinuierlichen) Prädiktoren auf ihren Mittelwert gesetzt sind.
 
 ```{r center}  
 
-variables_to_center <- c("age", "qwt_id", "elix_sum", "ndistinctATClevel2", "INPAT_count_before_qwt", "REHA_count_before_qwt", "char_sum", "n.days")
+variables_to_center <- c("age", "QEB_id", "elix_sum", "ndistinctATClevel2", "SAB_count_before_QEB", "REHA_count_before_QEB", "n.days")
 
 #centering
 for (var in variables_to_center) {
@@ -784,10 +708,10 @@ for (var in variables_to_center) {
 }
 ```
 
-# Intercorrelation of (numeric) predictors/outcome
+# Interkorrelations Matrix (nur kontinuierliche Variablen)
 
 ```{r correlation}
-cor_matrix <-  cor(final_data %>% select(c("age", "qwt_id", "elix_sum", "ndistinctATClevel2", "REHA_count_before_qwt", "INPAT_count_before_qwt", "char_sum", "n.days_cent")))
+cor_matrix <-  cor(final_data %>% select(c("age_cent", "QEB_id_cent", "elix_sum_cent", "ndistinctATClevel2_cent", "REHA_count_before_QEB_cent", "SAB_count_before_QEB_cent", "n.days_cent")))
 cor_matrix
 cor_melted <- melt(cor_matrix)
 
@@ -800,36 +724,23 @@ ggplot(cor_melted, aes(Var1, Var2, fill = value)) +
   theme_minimal() +
   labs(x = "", y = "", title = "Correlation Heatmap") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-# correlation of treatment duration and unplanned dropouts
-
-#with p values
-final_data$unpl_drop_numeric <- as.numeric(final_data$unpl_drop) - 1
-final_data$treat_dur_cat_numeric <- as.numeric(final_data$treat_dur_cat)
-
-cor.test(final_data$n.days_cent, final_data$unpl_drop_numeric, method = "spearman") # rho: -.36
-cor(final_data$treat_dur_cat_numeric, final_data$unpl_drop_numeric, method = "pearson") #-.38
-
-#remove unpl_drop_numeric and n.days_cat_numeric
-final_data <- final_data %>% select(-c(unpl_drop_numeric, treat_dur_cat_numeric))
 ```
 
 
 # Speicherplatz freigeben
 ```{r save_data}
-#alle Datenfiles die "all" oder "check" oder "missing" im Namen haben, können gelöscht werden
-#identifiziere alle Objekte, die gelöscht werden können
+# identify all objects that can be deleted
 objects <- ls()
 objects <- objects[grepl("all|check|missing", objects)]
-#lösche alle Objekte
+#delete all objects that match the pattern
 rm(list = objects)
 #free unused memory
 gc()
 ```
 
-# Überpfrüfung der Daten vor Modellierung
+## Überpfrüfung der Daten vor Modellierung
 
-## Ausreißer, fehlende Werte und Datentypen
+### Ausreißer, fehlende Werte und Datentypen
 ```{r check_data}
 final_data$gkv <- as.factor(final_data$gkv)
 final_data$pragmaid <- as.factor(final_data$pragmaid)
@@ -841,73 +752,47 @@ summary(final_data) #7 NAs in EmpType -> set to "other"
 final_data$gkv <- as.factor(final_data$gkv)
 final_data$emp.type[is.na(final_data$emp.type)] <- "other"
 
-##outliers?
-## remove #all outliers that match the definition: bigger than 75% quantile + 3*IQR (Tukey's fences)
-
-# qwt_id
-boxplot(final_data$qwt_id) # some patients did a lot of QWTs -> remove
-cutoff_qwtid <- quantile(final_data$qwt_id_cent, 0.75) + 3*IQR(final_data$qwt_id_cent) #9 QWTs
-cutoff_qwtid
-#remove them
-#final_data <- final_data %>% filter(qwt_id_cent <= cutoff_qwtid)
+# QEB_id
+boxplot(final_data$QEB_id) # some patients did a lot of QEBs
 
 # ndays
-boxplot(final_data$n.days) # no outliers
-cutoff_ndays <- quantile(final_data$n.days, 0.75) + 3*IQR(final_data$n.days)
-#how many cases are above the cutoff?
-sum(final_data$n.days > cutoff_ndays) # 0 cases 
+boxplot(final_data$n.days)
 
 #age
-boxplot(final_data$age) # some outliers
-cutoff_age <- quantile(final_data$age, 0.75) + 3*IQR(final_data$age)
-cutoff_age #107
-sum(final_data$age > cutoff_age) # 0 cases
-
-
-# char_sum
-boxplot(final_data$char_sum) # some outliers
-cutoff_char <- quantile(final_data$char_sum, 0.75) + 3*IQR(final_data$char_sum)
-cutoff_char
-#final_data <- final_data %>% filter(char_sum <= cutoff_char)
+boxplot(final_data$age)
 
 #elix_sum
-boxplot(final_data$elix_sum) # some outliers
-cuttoff_elix <- quantile(final_data$elix_sum, 0.75) + 3*IQR(final_data$elix_sum)
-cuttoff_elix
-#final_data <- final_data %>% filter(elix_sum <= cuttoff_elix)
+boxplot(final_data$elix_sum)
 
 #ndistinctATClevel2
-boxplot(final_data$ndistinctATClevel2) # some outliers
-cutoff_ndistinctATClevel2 <- quantile(final_data$ndistinctATClevel2, 0.75) + 3*IQR(final_data$ndistinctATClevel2)
-cutoff_ndistinctATClevel2
-#final_data <- final_data %>% filter(ndistinctATClevel2 <= cutoff_ndistinctATClevel2)
+boxplot(final_data$ndistinctATClevel2)
 ```
 
-## Linearer Zusammenhang mit Logit des Outcomes
+### Test der Modellannahme: Linearer Zusammenhang mit Logit des Outcomes
 
 Der Zusammenhang zwischen Prädiktoren und der abhängiggen Variablen irreguläre Beendigung der Behandlung soll mittels logistischen Regressionsmodellen geschätzt werden. Dafür muss zunächst die Modellannahme geprüft werden, dass ein linearer Zusammenhang zwischen metrischen Prädikoren und dem Logit des Outcomes besteht. Um diese Annahme zu testen, werden die logistischen Regressionsmodelle geschätzt und zusätzliche Prädiktoren inkludiert, die die Interkation zwischen dem jeweiligen metrischen Prädiktor und deren Logarithmus darstellen (Hosmer & Lemeshow, 1989).
 Relevant ist nur, ob die Interaktionstermine signifikant sind. Jede signifikante Interaktion deutet darauf hin, dass der jeweilige Haupteffekt die Annahme der Linearität im Logit verletzt. 
 
 ```{r linearity_test}
-# Erstellen der Interaktionsterme der metrischen Prädiktoren mit ihrem Logarithmus
+# Create the interaction terms of the metric predictors with their logarithm
 final_data$logageInt <- log(final_data$age+1) * final_data$age
-final_data$logqwt_idInt <- log(final_data$qwt_id+1) * final_data$qwt_id
+final_data$logQEB_idInt <- log(final_data$QEB_id+1) * final_data$QEB_id
 final_data$logelix_sumInt <- log(final_data$elix_sum+1) * final_data$elix_sum
 final_data$logndistinctATClevel2Int <- log(final_data$ndistinctATClevel2+1) * final_data$ndistinctATClevel2
-final_data$logREHA_count_before_qwtInt <- log(final_data$REHA_count_before_qwt+1) * final_data$REHA_count_before_qwt
-final_data$logINPAT_count_before_qwtInt <- log(final_data$INPAT_count_before_qwt+1) * final_data$INPAT_count_before_qwt
+final_data$logREHA_count_before_QEBInt <- log(final_data$REHA_count_before_QEB+1) * final_data$REHA_count_before_QEB
+final_data$logSAB_count_before_QEBInt <- log(final_data$SAB_count_before_QEB+1) * final_data$SAB_count_before_QEB
 
 
 
 outcomes <- c("unpl_drop")
 
 
-predictors <- "sex + nationality + emp.type + age + fost.degree_bin + logageInt + qwt_id + logqwt_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + REHA_count_before_qwt + logREHA_count_before_qwtInt + INPAT_count_before_qwt + logINPAT_count_before_qwtInt"
+predictors <- "sex + nationality + emp.type + age + fost.degree_bin + logageInt + QEB_id + logQEB_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + REHA_count_before_QEB + logREHA_count_before_QEBInt + SAB_count_before_QEB + logSAB_count_before_QEBInt"
 
 
 models <- list()
 
-# Schleife, um 1 Modell je Outcome zu fitten
+# loop through each outcome and fit the model
 for (outcome in outcomes) {
   formula <- as.formula(paste(outcome, "~", predictors))
   models[[outcome]] <- glm(formula, data = final_data, family = binomial(link = "logit"))
@@ -917,9 +802,9 @@ for (outcome in outcomes) {
 
 ```
 
-#logageInt und logInpat_count_before_qwtInt sind signifikant -> Annahme der Linearität im Logit verletzt
+logageInt und logSAB_count_before_QEBInt sind signifikant -> Annahme der Linearität im Logit verletzt
 
-## Sind Log-Tranformationen geeignet?
+#### Sind Log-Tranformationen geeignet?
 ```{r check_log_transformation}
 
 #age
@@ -929,7 +814,7 @@ data_test_age <- final_data %>%
   summarise(
     mean_pred = mean(age, na.rm = TRUE),
     p = mean(as.numeric(unpl_drop), na.rm = TRUE),
-    logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit-Transformation mit Laplace-Korrektur (falls p = 0 oder p = 1)
+    logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit transformation with Laplace correction (if p = 0 or p = 1)
     n = n()
   )
 
@@ -938,50 +823,51 @@ ggplot(data_test_age, aes(x = mean_pred, y = logit_p)) +
   geom_smooth(method = "loess", color = "red", se = FALSE) +
   geom_text(aes(label = n), hjust = 0, vjust = 0) +
   labs(
-    title = "Überprüfung der log-linearen Beziehung: age für unpl_drop",
+    title = "Überprüfung der log-linearen Beziehung: Alter",
     x = "Prädiktor age",
     y = "Logit(P(Y=1))"
   )
 
-data_test_INPAT_count_before_qwt <- final_data %>%
-  mutate(bin = cut(INPAT_count_before_qwt, breaks = 10)) %>%
+#SAB_count_before_QEB
+data_test_SAB_count_before_QEB <- final_data %>%
+  mutate(bin = cut(SAB_count_before_QEB, breaks = 10)) %>%
   group_by(bin) %>%
   summarise(
-    mean_pred = mean(INPAT_count_before_qwt, na.rm = TRUE),
+    mean_pred = mean(SAB_count_before_QEB, na.rm = TRUE),
     p = mean(as.numeric(unpl_drop), na.rm = TRUE),
-    logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit-Transformation mit Laplace-Korrektur (falls p = 0 oder p = 1)
+    logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit transformation with Laplace correction (if p = 0 or p = 1)
     n = n()
   )
 
-ggplot(data_test_INPAT_count_before_qwt, aes(x = mean_pred, y = logit_p)) +
+ggplot(data_test_SAB_count_before_QEB, aes(x = mean_pred, y = logit_p)) +
   geom_point() +
   geom_smooth(method = "loess", color = "red", se = FALSE) +
   geom_text(aes(label = n), hjust = 0, vjust = 0) +
   labs(
-    title = "Überprüfung der log-linearen Beziehung: INPAT_count_before_qwt für unpl_drop",
-    x = "Prädiktor INPAT_count_before_qwt",
+    title = "Überprüfung der log-linearen Beziehung: SAB_count_before_QEB",
+    x = "Prädiktor SAB_count_before_QEB",
     y = "Logit(P(Y=1))"
   )
 
 
 ```
-Logarithmische Transformationen der Prädiktoren scheinen eher nicht geeignet zu sein. Daher werden stattdessen Kategorien erstellt.
+Logarithmische Transformationen der Prädiktoren scheinen eher ungeeignet zu sein. Daher werden stattdessen Kategorien erstellt.
 
-# Kategorisierung von Prädiktoren
+#### Kategorisierung von Alter und SAB_count_before_QEB
 ```{r categorize}
-tertile_limits_i <- quantile(final_data$INPAT_count_before_qwt[final_data$INPAT_count_before_qwt > 0], probs = c(0.33, 0.66))
+tertile_limits_i <- quantile(final_data$SAB_count_before_QEB[final_data$SAB_count_before_QEB > 0], probs = c(0.33, 0.66))
 
 final_data <- final_data %>% mutate(
-  INPAT_count_before_qwt_cat = case_when(
-    INPAT_count_before_qwt == 0 ~ "0",
-    INPAT_count_before_qwt <= tertile_limits_i[1] ~ "1",
-    INPAT_count_before_qwt <= tertile_limits_i[2] ~ "2",
+  SAB_count_before_QEB_cat = case_when(
+    SAB_count_before_QEB == 0 ~ "0",
+    SAB_count_before_QEB <= tertile_limits_i[1] ~ "1",
+    SAB_count_before_QEB <= tertile_limits_i[2] ~ "2",
     TRUE ~ "3+") %>% factor(levels = c("0", "1", "2", "3+"))
 )
 
 # Check
-table(final_data$INPAT_count_before_qwt_cat, final_data$INPAT_count_before_qwt, useNA = "always")
-table(final_data$INPAT_count_before_qwt_cat)
+table(final_data$SAB_count_before_QEB_cat, final_data$SAB_count_before_QEB, useNA = "always")
+table(final_data$SAB_count_before_QEB_cat)
 
 
 
@@ -1001,23 +887,16 @@ table(final_data$agegroup)
 
 # check for multicollinearity
 ```{r multicollinearity}
-#Just run “linear regression” after assuming categorical dependent variable as continuous variable
-#final_data$treat_dur_cat_num <- as.numeric(final_data$treat_dur_cat)
-#vif_model <- lm(treat_dur_cat_num ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + REHA_count_before_qwt + INPAT_count_before_qwt, data = final_data)
+vif_model_ENTL <- glm(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat, data = final_data, family = "binomial")
 
-vif_model_ENTL <- glm(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat, data = final_data, family = "binomial")
-
-#car::vif(vif_model) #no multicollinearity
 car::vif(vif_model_ENTL)
-#"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
-
+#"... when using adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 ```
-
-# Logistische Modelle
+## Anpassung der Logistischen Modelle
 
 ```{r sensitivity}
-
-model_summaries_log <- data.frame(
+# initialize a data frame to store model summaries
+model_summaries <- data.frame(
   Model = character(),
   Deviance = numeric(),
   AIC = numeric(),
@@ -1025,10 +904,9 @@ model_summaries_log <- data.frame(
   stringsAsFactors = FALSE
 )
 
-add_model_summary_log <- function(model, model_name) {
-#  summary <- summary(model)
-#  stats <- summary$sumstat
-  model_summaries_log <<- rbind(model_summaries_log, data.frame(
+add_model_summary <- function(model, model_name) {
+
+  model_summaries <<- rbind(model_summaries, data.frame(
     Model = model_name,
     LogLik = logLik(model),
     AIC = AIC(model),
@@ -1036,130 +914,109 @@ add_model_summary_log <- function(model, model_name) {
   ))
 }
 
+#unconditional model
+model1 <- glmmTMB(unpl_drop ~ 1 + (1|pragmaid), family = "binomial", data = final_data)
+summary(model1)
+add_model_summary(model1, "Intercept")
 
-model1_log <- glmmTMB(unpl_drop ~ 1 + (1|pragmaid), family = "binomial", data = final_data)
-summary(model1_log)
-add_model_summary_log(model1_log, "Intercept")
+model2 <- glmmTMB(unpl_drop ~ sex + (1|pragmaid), family = "binomial", data = final_data)
+summary(model2)
+add_model_summary(model2, "Model 2")
 
-model2_log <- glmmTMB(unpl_drop ~ sex + (1|pragmaid), family = "binomial", data = final_data)
-summary(model2_log)
-add_model_summary_log(model2_log, "Model 2")
+model3 <- glmmTMB(unpl_drop ~ sex + agegroup + (1|pragmaid), family = "binomial", data = final_data)
+summary(model3)
+add_model_summary(model3, "Model 3")
 
-model3_log <- glmmTMB(unpl_drop ~ sex + agegroup + (1|pragmaid), family = "binomial", data = final_data)
-summary(model3_log)
-add_model_summary_log(model3_log, "Model 3")
+model4 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model4)
+add_model_summary(model4, "Model 4")
 
-model4_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model4_log)
-add_model_summary_log(model4_log, "Model 4")
+model5 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + (1|pragmaid), family = "binomial", data = final_data)
+summary(model5)
+add_model_summary(model5, "Model 5")
 
-model5_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + (1|pragmaid), family = "binomial", data = final_data)
-summary(model5_log)
-add_model_summary_log(model5_log, "Model 5")
+model6 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
+summary(model6)
+add_model_summary(model6, "Model 6")
 
-model6_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
-summary(model6_log)
-add_model_summary_log(model6_log, "Model 6")
+model7 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model7)
+add_model_summary(model7, "Model 7")
 
-# Modell mit elix_sum_cent
-model7_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + (1|pragmaid), 
+model8 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + (1|pragmaid), 
                       family = "binomial", data = final_data)
-summary(model7_log)
-add_model_summary_log(model7_log, "Model 7")
+summary(model8)
+add_model_summary(model8, "Model 8")
 
-# Modell mit char_sum_cent (statt elix_sum_cent)
-model8_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + char_sum_cent + (1|pragmaid), 
-                      family = "binomial", data = final_data)
-summary(model8_log)
-add_model_summary_log(model8_log, "Model 8")
-
-# Modell mit elix_sum_cent und fost.degree_bin
-model9_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + (1|pragmaid), 
-                      family = "binomial", data = final_data)
-summary(model9_log)
-add_model_summary_log(model9_log, "Model 9")
-
-# Modell mit ndistinctATClevel2_cent
-model10_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
+model9 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
-summary(model10_log)
-add_model_summary_log(model10_log, "Model 10")
+summary(model9)
+add_model_summary(model9, "Model 9")
 
-# Modell mit treat_dur_cat
-model11_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
+model10 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
-summary(model11_log)
-add_model_summary_log(model11_log, "Model 11")
+summary(model10)
+add_model_summary(model10, "Model 10")
 
-# Modell mit REHA_count_before_qwt_cent
-model12_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + (1|pragmaid), 
+model11 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
-summary(model12_log)
-add_model_summary_log(model12_log, "Model 12")
+summary(model11)
+add_model_summary(model11, "Model 11")
 
-# Modell mit INPAT_count_before_qwt_cat
-model13_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + (1|pragmaid), 
+model12 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + (1|pragmaid), 
                        family = "binomial", data = final_data)
-summary(model13_log)
-add_model_summary_log(model13_log, "Model 13")
-
+summary(model12)
+add_model_summary(model12, "Model 12")
 ```
 
-# Modell mit Interaktion von qwt_id mit anderen Prädiktoren
+
+# Modelle mit Interaktion von QEB_id mit anderen Prädiktoren
+
 ```{r interaction}
 
-model14_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + agegroup*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model14_log)
-add_model_summary_log(model14_log, "Model 14") #signifikante Interaktion!
-plot(ggeffects::ggpredict(model14_log, terms = c("qwt_id_cent", "agegroup")))
-anova(model13_log, model14_log, test = "Chisq") #keine Modellverbesserung
+model13 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + agegroup*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model13)
+add_model_summary(model13, "Model 13") #signifikante Interaktion!
+plot(ggeffects::ggpredict(model13, terms = c("QEB_id_cent", "agegroup")))
+anova(model12, model13, test = "Chisq") #keine Modellverbesserung
 
+model14 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + sex*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
+summary(model14)
+add_model_summary(model14, "Model 14") #keine signifikante Interaktion
 
-model15_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + sex*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
-summary(model15_log)
-add_model_summary_log(model15_log, "Model 15") #keine signifikante Interaktion
+model15 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + nationality*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
+summary(model15)
+add_model_summary(model15, "Model 15") #keine signifikante Interaktion
 
-model16_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + nationality*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
-summary(model16_log)
-add_model_summary_log(model16_log, "Model 16") #keine signifikante Interaktion
+model16 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + emp.type*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
+summary(model16)
+add_model_summary(model16, "Model 16") #keine signifikante Interaktion
 
-model17_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + emp.type*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
-summary(model17_log)
-add_model_summary_log(model17_log, "Model 17") #keine signifikante Interaktion
-plot(ggeffects::ggpredict(model17_log, terms = c("qwt_id_cent", "emp.type")))
+model17 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + elix_sum_cent*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model17)
+add_model_summary(model17, "Model 17") #keine signifikante Interaktion
 
-model18_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + elix_sum_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model18_log)
-add_model_summary_log(model18_log, "Model 18") #keine signifikante Interaktion
+model18 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + fost.degree_bin*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model18)
+add_model_summary(model18, "Model 18") #keine signifikante Interaktion
 
-model19_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + fost.degree_bin*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model19_log)
-add_model_summary_log(model19_log, "Model 19") #keine signifikante Interaktion
+model19 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + ndistinctATClevel2_cent*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model19)
+add_model_summary(model19, "Model 19") #keine signifikante Interaktion
 
-model20_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + ndistinctATClevel2_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model20_log)
-add_model_summary_log(model20_log, "Model 20") #keine signifikante Interaktion
+model20 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + REHA_count_before_QEB_cent*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model20)
+add_model_summary(model20, "Model 20") #keine signifikante Interaktion
 
-model21_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + REHA_count_before_qwt_cent*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model21_log)
-add_model_summary_log(model21_log, "Model 21") #keine signifikante Interaktion
-
-model22_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat + INPAT_count_before_qwt_cat*qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model22_log)
-add_model_summary_log(model22_log, "Model 22") #signifikante Interaktion!!
-
-
-
-model23_log <- glmmTMB(unpl_drop ~ sex + agegroup + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cat  + emp.type * qwt_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model23_log)
-add_model_summary_log(model23_log, "Model 23")
-
+model21 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + SAB_count_before_QEB_cat*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+summary(model21)
+add_model_summary(model21, "Model 21") #keine signifikante Interaktion
 ```
 
 #Evaluate model fit 
 
 ```{r model_fit}
-choose_best_model_log <- function(summary_df, criterion) {
+choose_best_model <- function(summary_df, criterion) {
   if (!criterion %in% names(summary_df)) {
     stop("Ungültiges Kriterium. Wähle entweder 'LogLik', 'AIC' oder 'BIC'.")
   }
@@ -1173,16 +1030,15 @@ choose_best_model_log <- function(summary_df, criterion) {
   return(best_model_row)
 }
 
-choose_best_model_log(model_summaries_log, "BIC") 
-choose_best_model_log(model_summaries_log, "AIC") 
-choose_best_model_log(model_summaries_log, "LogLik") 
+choose_best_model(model_summaries, "BIC") 
+choose_best_model(model_summaries, "AIC") 
+choose_best_model(model_summaries, "LogLik") 
 
 #plot model summaries as skree plot
-model_summaries_long <- model_summaries_log %>%
+model_summaries_long <- model_summaries %>%
   pivot_longer(cols = c(LogLik, AIC, BIC), names_to = "Criterion", values_to = "Value")
 
-#desired order of models: intercept, model 2, model 3, model 4, model 5, model 6, model 7, model 8, model 9, model 10, model 11, model 12, model 13, model 14, model 15, model 16, model 17
-model_summaries_long$Model <- factor(model_summaries_long$Model, levels = c("Intercept", "Model 2", "Model 3", "Model 4", "Model 5", "Model 6", "Model 7", "Model 8", "Model 9", "Model 10", "Model 11", "Model 12", "Model 13", "Model 14", "Model 15", "Model 16", "Model 17", "Model 18", "Model 19", "Model 20", "Model 21", "Model 22", "Model 23"))
+model_summaries_long$Model <- factor(model_summaries_long$Model, levels = c("Intercept", "Model 2", "Model 3", "Model 4", "Model 5", "Model 6", "Model 7", "Model 8", "Model 9", "Model 10", "Model 11", "Model 12", "Model 13", "Model 14", "Model 15", "Model 16", "Model 17", "Model 18", "Model 19", "Model 20", "Model 21"))
 
 ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
   geom_point(stat = "identity") +
@@ -1196,12 +1052,14 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
   )
 
 ```
-# Decide on best model 
+
+## Modellauswahl
+
 ```{r best_model}
-best_model <- model13_log
+best_model <- model12
 ```
 
-# Model diagnostics: ICC and R2
+## Model Diagnostik: ICC and R2
 ```{r model_iccr2}
 #R2 = proportion of the explained variance (of the full model)
 performance::r2_nakagawa(best_model) 
@@ -1209,14 +1067,14 @@ performance::r2_nakagawa(best_model)
 # ICC = proportion of explained variance that can be attributed to the random effects
 residual_var <- pi^2 / 3
 random_effects_var <- VarCorr(best_model)$cond$pragmaid[1, 1]
-ICC <- random_effects_var / (random_effects_var + residual_var) #thisa is also the adjusted variance (i.e. the variance that is explained by the random effects without the fixed effects variance in the denominator)
-print(ICC) #.42
-performance::icc(best_model) #.42 = etwa 42% der outcomevarianz wird durch unterschiede in den gruppen (pragmaID) erklärt
-anova(model1_log, best_model, test = "Chisq") 
+ICC <- random_effects_var / (random_effects_var + residual_var)
+print(ICC)
+performance::icc(best_model)
+anova(model1, best_model, test = "Chisq") 
 
 
 ```
-## Odds Ratios of significant predictors
+## Odds Ratios der signifikanten Prädiktoren
 ```{r odds_ratios}
 # Odds Ratios
 coefficents <- summary(best_model)$coefficients$cond[, 1]
@@ -1239,74 +1097,12 @@ odds_ratios_df <- data.frame(
 rownames(odds_ratios_df) <- NULL
 ```
 
-# model checking and diagnostics
+## Fallzahlen und Stichprobenbeschreibung
 
-```{r residuals}
-model_simres <- simulateResiduals(best_model)
-plot(model_simres)
-```
-
-
-# Plot results
-
-```{r plot_results}
-# Predicted probabilities
-new_labels <- c(
-  "(Intercept)" = "Intercept", 
-  "agegroup35-44" = "Alter: 35-44\n(Ref.: 18-34)",
-  "agegroup45-54" = "Alter: 45-54\n(Ref.: 18-34)",
-  "agegroup55-64" = "Alter: 55-64\n(Ref.: 18-34)",
-  "agegroup65+" = "Alter: 65+\n(Ref.: 18-34)",
-  "qwt_id_cent" = "Behandlungserfahrung QE",
-  "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
-  "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht deutsch)",
-  "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
-  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
-  "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
-  "elix_sum_cent" = "Elixhauser-Score",
-  "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
-  "ndistinctATClevel2_cent" = "Anzahl Medikationen",
-  "INPAT_count_before_qwt_cat1" = "Behandlungserfahrung SAB: 1\n(Ref.: 0)",
-  "INPAT_count_before_qwt_cat2" = "Behandlungserfahrung SAB: 2\n(Ref.: 0)",
-  "INPAT_count_before_qwt_cat3+" = "Behandlungserfahrung SAB: 3+\n(Ref.: 0)",
-  "REHA_count_before_qwt_cent" = "Behandlungserfahrung REHA"
-)
-
-
-coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.092, 3), wrap.labels = 100)
-
-coefffix_plot <- coefffix_plot + 
-  #change size of axis labels
-  theme_minimal() +
-  theme(axis.text.y = element_text(size = 12))
-  
-coefffix_plot
-
-#save plot
-graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_QE.png"), width=7.5, height=6)
-
-#Interaktion)
-# interact_plot <- plot(ggeffects::ggpredict(model22_log, terms = c("qwt_id_cent", "INPAT_count_before_qwt_cent [-1, 0, 1, 3, 5]")))
-# 
-# interact_plot <- interact_plot + 
-#   ggtitle("") +                 
-#   labs(x = "Behandlungserfahrung QE",             
-#        y = "Vorhergesagte Wahrscheinlichkeit irreguläre Beendigung",
-#        color = "Behandlungserfahrung\nINPAT") +       
-#   theme_minimal()                                    
-# interact_plot
-# 
-# #save plot
-# graph2doc(x = interact_plot, file=file.path(folder_plot, "interact_plot_QE.png"), width=7.5, height=5)
-
-
-```
-
-# Fallzahlen und Stichprobenbeschreibung
 ```{r sample_size}
-# wie viele patients?
+# n patients 
 n_pat <- final_data %>% distinct(pragmaid) %>% nrow()
-# wie viele Behandlungen?
+# n treatments
 n_treats <- final_data %>% nrow()
 
 print(n_pat)
@@ -1334,506 +1130,94 @@ summary(final_data$elix_sum)
 #ndistinctATClevel2
 summary(final_data$ndistinctATClevel2)
 
-#fos.degree_bin
+#fost.degree_bin
 prop.table(table(final_data$fost.degree_bin))
 
-#REHA_count_before_qwt
-summary(final_data$REHA_count_before_qwt)
+#REHA_count_before_QEB
+summary(final_data$REHA_count_before_QEB)
 
-#INPAT_count_before_qwt
-summary(final_data$INPAT_count_before_qwt)
+#SAB_count_before_QEB
+summary(final_data$SAB_count_before_QEB)
 
-#qwt_id
-summary(final_data$qwt_id)
+#QEB_id
+summary(final_data$QEB_id)
 
-#anzahl distinkter pragmaIDs mit qwt_id > 0 / anzahl aller distinkter pragmaIDs = anteil der patienten mit mehr als einer QWT
-(final_data %>% filter(qwt_id > 0) %>% distinct(pragmaid) %>% nrow()) / n_pat 
-#mehr als 2 QWTs
-(final_data %>% filter(qwt_id > 1) %>% distinct(pragmaid) %>% nrow()) / n_pat
-#mehr als 3 QWTs
-(final_data %>% filter(qwt_id > 2) %>% distinct(pragmaid) %>% nrow()) / n_pat
-#mehr als 4 QWTs
-(final_data %>% filter(qwt_id > 4) %>% distinct(pragmaid) %>% nrow()) / n_pat
+# number of distinct pragmaIDs with QEB_id > 0 / number of all distinct pragmaIDs = proportion of patients with more than one QEB
+(final_data %>% filter(QEB_id > 0) %>% distinct(pragmaid) %>% nrow()) / n_pat 
+#more than 2 QEBs
+(final_data %>% filter(QEB_id > 1) %>% distinct(pragmaid) %>% nrow()) / n_pat
+#more than 3 QEBs
+(final_data %>% filter(QEB_id > 2) %>% distinct(pragmaid) %>% nrow()) / n_pat
+#more than 4 QEBs
+(final_data %>% filter(QEB_id > 4) %>% distinct(pragmaid) %>% nrow()) / n_pat
 
 #average number of treatments per patient
-#QWT
-n_treats_qwt <- final_data %>% group_by(pragmaid) %>% summarise(n_treats = n()) %>% pull(n_treats)
-summary(n_treats_qwt)
+#QEB
+n_treats_QEB <- final_data %>% group_by(pragmaid) %>% summarise(n_treats = n()) %>% pull(n_treats)
+summary(n_treats_QEB)
 
 #REHA
 n_treats_reha <- final_data %>%
   group_by(pragmaid) %>%
-  slice_max(REHA_count_before_qwt, with_ties = FALSE) %>% 
+  slice_max(REHA_count_before_QEB, with_ties = FALSE) %>% 
   ungroup() %>%
-  pull(REHA_count_before_qwt)
+  pull(REHA_count_before_QEB)
 summary(n_treats_reha)
 
-#INPAT
-n_treats_inpat <- final_data %>%
+#SAB
+n_treats_SAB <- final_data %>%
   group_by(pragmaid) %>%
-  slice_max(INPAT_count_before_qwt, with_ties = FALSE) %>% 
+  slice_max(SAB_count_before_QEB, with_ties = FALSE) %>% 
   ungroup() %>%
-  pull(INPAT_count_before_qwt)
-summary(n_treats_inpat)
+  pull(SAB_count_before_QEB)
+summary(n_treats_SAB)
 
 ```
 
+## Plot 
 
+```{r plot_results}
 
-# ALT!
-
-```{r old_code}
-qwt <- qwt %>% 
-  filter(ENTL301 != "Tod") %>%
-  mutate(unpl_drop = factor(case_when(
-  ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
-  ENTL301 %in% c("regulär", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung",
-                 "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
-  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
-
-prop.table(table(qwt$unpl_drop))
-ggplot(qwt, aes(x = unpl_drop, y = n.days)) + geom_violin() + geom_boxplot(width = 0.1) + theme(axis.text.x = element_text(angle = 35, hjust = 1))
-
-
-# Hinzufügen der OPS Codes
-
-#
-#show rows that have the same KH_FALL_ID
-#qwt_duplicates <- qwt %>% 
-#  group_by(KH_FALL_ID, pragmaid) %>% 
-#  filter(n() > 1) #es gibt einige Personen, die innerhalb eines KH Aufenthalts mehrere Rehas gemacht haben
-
-#rename ops.date to date.treat.start
-#qwt_OPS <- qwt_OPS %>% 
-#  filter(grepl("^8-985|^8985|^9-647|^9647", OPS)) %>%
-#  rename(date.treat.start = date.ops) %>%
-#  mutate(date.treat.start = as.Date(date.treat.start))
-
-#qwt_full <- left_join(qwt, qwt_OPS, by = c("KH_FALL_ID", "pragmaid", "gkv", "date.treat.start"))
-
-
-
-#add diagnoses to total_employ and filter for diagnoses according to time criteria and exclude alcohol diagnoses
-#diagnoses_employ_all <- left_join(total_employ, diagnoses_filtered, by = c("pragmaid", "gkv")) %>%
-#  filter(
-#    (date.diag.start <= date.treat.start & date.diag.end >= (date.treat.end - months(1))) |  # Diagnosestart muss vor oder gleich QWT-Start liegen und Diagnose muss noch bis mindestens 1 Monat vor QWT-Ende laufen
-#    (is.na(date.diag.end) & date.diag.start >= (date.treat.start - months(1)) & date.diag.start <= #date.treat.start) |  # Falls date.diag.end NA ist, darf date.diag.start nur bis zu einem Monat vor QWT-Start und maximal gleich QWT-Start liegen
-#    (is.na(date.diag.start) & date.diag.end >= (date.treat.end - months(1)) & date.diag.end <= (date.treat.end + weeks(1)))  # Falls date.diag.start NA ist, darf date.diag.end nur bis zu einem Monat vor und eine Woche nach QWT-Ende liegen
-#  ) %>%
-#  filter(icd.alc == "FALSE") %>%
-#  distinct(pragmaid, qwt_id, icd, .keep_all = TRUE)
-
-#----------------------------------------------
-# Testen mit einem kleinen Beispiel-Datensatz
-test_df <- data.frame(
-  pragmaid = 1:6,
-  gkv = c("aok", "aok", "dak", "dak", "dak", "aok"),
-  date.treat.start = as.Date(c('2021-01-01', '2021-06-01', '2021-07-01', '2021-10-01', '2022-01-01', '2022-04-01')),
-  setting = c("outpatient", "inpatient", "outpatient", "inpatient", "outpatient", "outpatient"),
-  date.diag.start = as.Date(c('2019-07-01', '2020-11-01', '2021-03-01', '2021-09-01', '2021-11-01', '2022-01-01')),
-  qwt_id = 1:6,
-  icd = c("A", "B", "C", "D", "E", "F")
+new_labels <- c(
+  "(Intercept)" = "Intercept", 
+  "agegroup35-44" = "Alter: 35-44\n(Ref.: 18-34)",
+  "agegroup45-54" = "Alter: 45-54\n(Ref.: 18-34)",
+  "agegroup55-64" = "Alter: 55-64\n(Ref.: 18-34)",
+  "agegroup65+" = "Alter: 65+\n(Ref.: 18-34)",
+  "QEB_id_cent" = "Behandlungserfahrung QEB",
+  "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
+  "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht deutsch)",
+  "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
+  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
+  "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
+  "elix_sum_cent" = "Elixhauser-Score",
+  "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
+  "ndistinctATClevel2_cent" = "Anzahl Medikationen",
+  "SAB_count_before_QEB_cat1" = "Behandlungserfahrung SAB: 1\n(Ref.: 0)",
+  "SAB_count_before_QEB_cat2" = "Behandlungserfahrung SAB: 2\n(Ref.: 0)",
+  "SAB_count_before_QEB_cat3+" = "Behandlungserfahrung SAB: 3+\n(Ref.: 0)",
+  "REHA_count_before_QEB_cent" = "Behandlungserfahrung REHA"
 )
 
-result <- test_df %>%
-  mutate(test_column = case_when(
-    (setting == "outpatient" & date.diag.start >= (date.treat.start - months(6)) & date.diag.start <= date.treat.start) |
-    (setting != "outpatient" & date.diag.start >= (date.treat.start - months(6)) & date.diag.start <= date.treat.start) ~ 1,
-    TRUE ~ 0
-  ))
-#----------------------------------------------
 
+coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.092, 3), wrap.labels = 100)
 
-#Plausi check ndistinct ATC (should increase with elix_sum)
-ggplot(final_data, aes(x = elix_sum, y = ndistinctATC)) + geom_point() + geom_smooth(method = "lm")
-#correlation between elix_sum and ndistinctATC?
-cor(final_data$elix_sum, final_data$ndistinctATC) #0.50
-
-#correlation of elix_sum and char_sum
-cor(final_data$elix_sum, final_data$char_sum) #0.75-> high correlation
-ggplot(final_data, aes(x = elix_sum, y = char_sum)) + geom_point() + geom_smooth(method = "lm")
-
-#correlation between elix_sum and ndistinctATClevel2
-ggplot(final_data, aes(x = elix_sum, y = ndistinctATClevel2)) + geom_point() + geom_smooth(method = "lm")
-cor(final_data$elix_sum, final_data$ndistinctATClevel2) #0.51
-
-#corr between char_sum and ndistinctATClevel2
-cor(final_data$char_sum, final_data$ndistinctATClevel2) #0.35
-ggplot(final_data, aes(x = char_sum, y = ndistinctATClevel2)) + geom_point() + geom_smooth(method = "lm")
-```
-
-## Logistisches Modell zur Vorhersage von dichotomisierter Behandlungsdauer (unter vs. über 20 Tage)
-```{r model_glmm}
-
-#model1.1 <- glmmTMB(treat_dur_bin ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|gkv/pragmaid), data = final_data, family = binomial)
-
-#summary(model1.1)
-```
-
-## Ordinales Modell zur Vorhersage von Behandlungsdauer in drei Kategorien
-```{r model_clmm}
-# Modellvergleich mit und ohne GKV
-#model1.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + gkv + (1|pragmaid), data = final_data)
-
-#summary(model1.2)
-#AIC(model1.2)
-#BIC(model1.2)
-#logLik(model1.2)
-
-#model1.3 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = final_data)
-
-#print(model1.3)
-#summary(model1.3)
-#AIC(model1.3)
-#BIC(model1.3)
-#logLik(model1.3)
-
-#Modell ohne GKV ist besser
-```
-
-### Welche Variable für Medikation ergibt das beste Modell?
-```{r model_med}
-#Modell mit ndistinctATC
-
-#model2.1 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi + (1|pragmaid), data = final_data)
-
-#model2.2 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + polymedi_level2 + (1|pragmaid), data = final_data)
-
-#model2.3 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATClevel2 + (1|pragmaid), data = final_data)
-
-#model2.4 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + ndistinctATC + (1|pragmaid), data = final_data)
-
-#model2.5 <- clmm(treat_dur_cat ~ sex + age + qwt_id + nationality + emp.type + elix_sum + fost.degree_bin + (1|pragmaid), data = final_data)
-#plomedikation mitaufzunehmen macht das Modell kaum/gar nicht besser, je nach Kriterium sogar schlechter
-
-#compare models
-#for (i in 1:5) {
-#  print(paste("Model", i))
-#  print(AIC(get(paste("model2.", i, sep = ""))))
-#  print(BIC(get(paste("model2.", i, sep = ""))))
-#  print(logLik(get(paste("model2.", i, sep = ""))))
-#}
-
-#summary(model2.3)
-#save(model2.3, file = "modeloutput_CLMM_PRAGMA_dropout.RData")
-#summary(model2.5) #elix_sum ist kein signifikanter Prädiktor, egal ob Medikation im Modell ist oder nicht
-#[1] "Model 4"
-#[1] 7021.353
-#[1] 7102.56
-#'log Lik.' -3497.677 (df=13)                
-
-#[1] "Model 2"
-#[1] 7020.536
-#[1] 7101.743 -> erniedrigen auf 5 medi -> schlechterer fit
-
-#Model mit 30 Tage Look Back Window und ndistinctATClevel2 hat das beste AIC, laut BIC (restriktiver gegenüber weiteren Prädiktoren) ist das Modell ohne Medikation am besten
-
-
-
-
-
-#Modell 3 (treat_dur_cat ~ sex + age + qwt_id) scheint insgesamt die beste Modellanpassung zu bieten, basierend auf AIC und BIC, trotz der geringfügigen Verbesserung der Pseudo-R²-Werte durch Modell 4.
-#Modell 4 (treat_dur_cat ~ sex + age + qwt_id + nationality) bietet die besten Pseudo-R²-Werte und die niedrigste Deviance, aber es hat einen leicht höheren AIC und BIC im Vergleich zu Modell 3. Daher wird nationality nicht in das endgültige Modell aufgenommen.
-model3.5 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model3.5) #Modell 5 erklärt die Daten am umfassendsten und bietet insgesamt die beste Passung, basierend auf AIC, BIC, Pseudo-R² und Deviance. Allerdings hat Modell 3 ein besseres BIC. 
-model3.6 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model3.6) #Modell 6 ist besser
-model3.7.1 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + elix_sum, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model3.7.1) #Komorbidität nach Elixhauser verbessert Modell nicht und hat auch keinen siginifikanten Erklärungswert
-model3.7.2 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + char_sum, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model3.7.2) #Komorbidität nach Charlson verbessert Modell und hat siginifikanten Erklärungswert
-model3.8 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + char_sum + fost.degree_bin, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model3.8) #Modell 7.2 ist besser
-model3.9 <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id + emp.type + gkv + char_sum + ndistinctATClevel2, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mmblogit(model3.9)#Basierend auf den AIC-, BIC- und Pseudo-R²-Maßen scheint Model 3.9 das beste Modell zu sein. Es hat die niedrigsten AIC- und die besten Pseudo-R²-Werte (McFadden, Cox-Snell und Nagelkerke). Obwohl es nicht den niedrigsten BIC-Wert hat (dieser geht an Model 3.7.2), sind die anderen Verbesserungen signifikant.
-
-# alt: Modell 6 ist besser, interessant ist aber, dass aus den dtrei Prädiktoren, die die Krankheitslast beschreiben (forst_degree, elix_sum, ndistinctATClevel2), ndistinctATClevel2 den besseren model fit bietet nach allen Kriterien zufolge
-
-```
-
-
-```{r plot_pred_probs}
-#define function to generate new data that varies the variables of interest (age, qwt_id, char_sum) and then plot the predicted probabilities with the variable of interest on x axis
-
-predict_and_plot <- function(variable_of_interest, model, data) {
-  # Werte für jede Variable von Interesse
-  age_values <- seq(from = min(data$age,na.rm=TRUE),to=max(data$age, na.rm = TRUE), length.out = 10)  # 10 Werte für Alter
-  qwt_id_values <- seq(from = min(data$qwt_id,na.rm=TRUE),to=max(data$qwt_id, na.rm = TRUE), length.out = 9)  # 4 Werte für qwt_id
-  char_sum_values <- seq(from = min(data$char_sum,na.rm=TRUE),to=max(data$char_sum, na.rm = TRUE), length.out = 5)  # 4 Werte für char_sum  # Neue Daten je nach Variable von Interesse erstellen
-  if (variable_of_interest == "age") {
-    new_data <- expand.grid(
-      age = age_values,
-      sex = unique(data$sex),
-      emp.type=unique(data$emp.type),
-      qwt_id = mean(data$qwt_id, na.rm=TRUE),
-      char_sum=mean(data$char_sum, na.rm = TRUE)
-    )
-    x_label <- "Alter"
-  } else if (variable_of_interest == "qwt_id") {
-    new_data <- expand.grid(
-      age = mean(data$age, na.rm=TRUE),
-      sex = unique(data$sex),
-      emp.type=unique(data$emp.type),
-      qwt_id = qwt_id_values,
-      char_sum=mean(data$char_sum, na.rm = TRUE)
-    )
-    x_label <- "QWT ID"
-  } else if (variable_of_interest == "char_sum") {
-    new_data <- expand.grid(
-      age = mean(data$age, na.rm=TRUE),
-      sex = unique(data$sex),
-      emp.type=unique(data$emp.type),
-      qwt_id = mean(data$qwt_id, na.rm=TRUE),
-      char_sum= char_sum_values
-    )
-    x_label <- "Charlson Sumscore"
-  } else {
-    stop("Ununterstützte Variable der Interesse.")
-  }
+coefffix_plot <- coefffix_plot + 
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 12),
+        plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
+        )
   
-  # Dummy-Level für pragmaid hinzufügen, falls notwendig
-  if ("pragmaid" %in% colnames(data)) {
-    new_data$pragmaid <- levels(data$pragmaid)[1] # Nutze ein existierendes Level als Dummy
-  }
-  
-  # Vorhersagen berechnen
-  predicted_probs <- predict(model, newdata = new_data, type = "response")
-  
-  # Kombiniere die Vorhersagen mit den Eingabewerten
-  predicted_data <- cbind(new_data, predicted_probs)
-  
-  # Reshape die Daten für ggplot
-  predicted_long <- pivot_longer(predicted_data, 
-                                 cols = c("1-6 Tage", "7-20 Tage", "21+ Tage"), 
-                                 names_to = "treat_dur_cat", 
-                                 values_to = "predicted_prob")
-  
-  #change the order of the levels of treat_dur_cat
-  predicted_long$treat_dur_cat <- factor(predicted_long$treat_dur_cat, levels = c("1-6 Tage", "7-20 Tage", "21+ Tage"))
-  
-  # Plotten der vorhergesagten Wahrscheinlichkeiten
-  ggplot(predicted_long, aes(x = .data[[variable_of_interest]], y = predicted_prob, color = sex)) +
-    geom_line() +
-    facet_grid(treat_dur_cat ~ emp.type, scales = "free") +
-    xlab(x_label) +
-    ylab("Vorhergesagte Wahrscheinlichkeit") +
-    theme_minimal() +
-    labs(color = "Geschlecht") +
-    theme(legend.position = "bottom")
-}
+coefffix_plot
 
-
-predict_and_plot("qwt_id", model9, final_data)
-predict_and_plot("age", model9, final_data)
-predict_and_plot("char_sum", model9, final_data)
-
-#save plots in folder_plot
-ggsave(file.path(folder_plot, "predicted_probs_qwt.png"), predict_and_plot("qwt_id", model9, final_data), width = 20, height = 25, units = "cm")
-ggsave(file.path(folder_plot, "predicted_probs_age.png"), predict_and_plot("age", model9, final_data), width = 20, height = 25, units = "cm")
-ggsave(file.path(folder_plot, "predicted_probs_char.png"), predict_and_plot("char_sum", model9, final_data), width = 20, height = 25, units = "cm")
-
-
+#save as tif
+ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, width = 8, height = 7, dpi = 700)
 
 ```
-# Interpretation der festen Effekte (Refernzgruppe 1-6 Tage)
 
-## Signifikanz und Modellkoeffizienten
+## Model Checks und Diagnostiken
 
-- 1.42 (Intercept) ist geschätzt als log odds für eine Behandlungsdauer von 7-20 Tagen bei einer Frau, die 0 Jahre alt ist und ihre 0. QWT hat -> Log Odds positiv -> Behandlungen von 7-20 Tagen sind wahrscheinlicher als 1-6 Tage
-
-- signifikant negativer Koeffizienten für Geschlecht:männlich -> Männer haben eine geringere Wahrscheinlichkeit für Behandlungen von 21+ Tagen als Frauen (7-20 Tage n.s.)
-
-- signifikant positiver Koeffizienten für Alter -> mit steigendem Alter steigt die Wahrscheinlichkeit für Behandlungen von 7-20 Tagen im Vergleich zu 1-6 Tagen (21+ Tage n.s.)
-
-- signifikant negativer Koeffizient für QWT_ID -> mit fortlaufender QWT_ID sinkt die Wahrscheinlichkeit für Behandlungen 21+ Tagen (7-20 Tage n.s.)
-
-- Menschen in Beschäfigung haben verglichen mit allen anderen Beschäftigungsarten eine höhere Wahrscheinlichkeit für Behandlungen von 7-20 Tagen und 21+ Tagen im Vergleich zu 1-6 Tagen
-
-- signifikant positiver Koeffizient für Charlson Sumscore -> mit steigendem Charlson Sumscore steigt die Wahrscheinlichkeit für Behandlungen von 7-20 Tagen und 21+ Tagen im Vergleich zu 1-6 Tagen
-
-
-Der zufällige Intercept auf Gruppenebene (pragmaid) ist sehr gering, was darauf hindeutet, dass die Gruppierungsvariable pragmaid einen sehr kleinen Einfluss auf die Variation der Behandlungsdauer hat.
-
-
-## Predicted Probabilities
-
-- mit steigendem Charlson Sumsore steigt die Wahrscheinlichkeit für eine längere Behandlungsdauer (7-20 Tage und 21+ Tage), während die Wahrscheinlichkeit für eine kürzere Behandlungsdauer (1-6 Tage) abnimmt. Dies ist konsistent über Beschäftigungsstatus hinweg und bei beiden Geschlechtern zu beobachten.
-
-- Männer haben eine geringere Wahrscheinlichkeit für eine längere Behandlungsdauer (21+ Tage) im Vergleich zu Frauen
-
-- Menschen in Beschäftigung haben eine geringere Wahrscheinlichkeit für kürzere Behandlungsdauern (1-6 Tage) 
-
-
-
-
-
-
-
-
-# Check linearity assumption
-```{r check_linearity}
-
-# ASSUMPTIONS:
-#Linearity: Linear relationship between continuous variables and the logit transformation of the outcome variable. 
-
-probabilities <- predict(model9, type = "response")
-#dataset with only continuous variables
-final_data_cont <- final_data %>% ungroup() %>% select_if(is.numeric) %>% select(-(c(treat_dur_cat_num, n.days, ndistinctATC, elix_sum, yob)))
-
-predictors <- colnames(final_data_cont)
-
-
-# Logit für jede Kategorie berechnen 
-logits <- apply(probabilities, 2, function(p) log(p / (1 - p)))
-
-logits_df <- as.data.frame(logits) 
-combined_data <- cbind(final_data_cont, logits_df)
-
-final_data_long <- combined_data %>%
-  pivot_longer(
-    cols = all_of(names(logits_df)),  # Nutze die Spaltennamen deiner logits_df direkt
-    names_to = "category",
-    values_to = "logit"
-  ) %>%
-  pivot_longer(
-    cols = all_of(predictors),   # Stelle sicher, dass predictors existiert
-    names_to = "predictors",
-    values_to = "predictor.value"
-  )
-
-# Scatterplot
-ckeck_lin <- ggplot(final_data_long, aes(x = predictor.value, y = logit)) +
-  geom_point(size = 0.5, alpha = 0.5) +
-  geom_smooth(method = "loess") +
-  theme_bw() +
-  facet_grid(category ~ predictors, scales = "free") +
-  labs(
-    title = "Beziehung zwischen Prädiktoren und Logits",
-    x = "Prädiktorwert",
-    y = "Logit"
-  ) +
-    theme(
-    strip.text = element_text(size = 6)  # Verkleinert die Textgröße für Facettenbeschriftungen
-  )
-
-ggsave("check_linearity_qwt.png", ckeck_lin, width = 20, height = 25, units = "cm")
-
-#looks mostly fine, but maybe some problems with age (plot for 21+ days), looks rather cubic than linear (only in extreme ends)
-```
-#Multinomiale Modelle (dh. Outcome ist kategorial und nicht binär, hier treat_dur_cat)
-
-```{r multinom_models}
-# Initialisiere einen leeren DataFrame für die Modellanpassungsparameter
-model_summaries <- data.frame(
-  Model = character(),
-  Deviance = numeric(),
-  AIC = numeric(),
-  BIC = numeric(),
-  stringsAsFactors = FALSE
-)
-
-add_model_summary <- function(model, model_name) {
-  summary <- getSummary.mblogit(model)
-  stats <- summary$sumstat
-  model_summaries <<- rbind(model_summaries, data.frame(
-    Model = model_name,
-    Deviance = stats["deviance"],
-    AIC = stats["AIC"],
-    BIC = stats["BIC"]
-  ))
-}
-
-# nur Intercept und random effects
-model1_multinom <- mblogit(formula = treat_dur_cat ~ 1, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model1_multinom)
-add_model_summary(model1_multinom, "Intercept_multinom")
-
-model2_multinom <- mblogit(formula = treat_dur_cat ~ sex, random = ~ 1 | pragmaid, data = final_data) # Model 2 führt zu Verbesserungen in deviance und AIC, aber nicht in BIC. Außerdem ist sex ein signifikanter Prädiktor
-getSummary.mblogit(model2_multinom)
-add_model_summary(model2_multinom, "Model 2_multinom")
-
-model3_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model3_multinom) # Modell 3 hat die besten Anpassungswerte basierend auf Devianz und AIC. "age" scheint ein signifikanter Prädiktor für die Kategorien „7–20 Tage“ und „21+ Tage“ im Vergleich zu „1-6 Tage“ zu sein.
-add_model_summary(model3_multinom, "Model 3_multinom")
-
-model4_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model4_multinom) # Modell 4 hat die besten Anpassungswerte basierend auf Devianz, AIC und BIC. "qwt_id" scheint ein (negativer) signifikanter Prädiktor für die Kategorien „21+ Tage“ im Vergleich zu „1-6 Tage“ zu sein.
-add_model_summary(model4_multinom, "Model 4_multinom")
-
-model5_multinom <- mblogit(formula = treat_dur_cat ~ sex + age + qwt_id_cent + nationality, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model5_multinom) # Modell 5 bietet keinen Vorteil gegenüber Modell 4 (außer leicht niedrigerer deviance), nationality wird nicht in das Modell aufgenommen
-add_model_summary(model5_multinom, "Model 5_multinom")
-
-model6_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + emp.type, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model6_multinom) # Model 6 hat besseres AIC und deviance als Modell 4, aber schlechteres BIC - emp type ist signifikanter Prädiktor
-add_model_summary(model6_multinom, "Model 6_multinom")
-
-model7_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + emp.type + gkv, random = ~ 1 | pragmaid, data = final_data) # Model 7 bietet keinen Vorteil gegenüber Modell 6, gkv wird daher nicht ins Modell aufgenommen
-getSummary.mblogit(model7_multinom)
-add_model_summary(model7_multinom, "Model 7_multinom")
-
-model8_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + emp.type + elix_sum_cent, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model8_multinom) 
-add_model_summary(model8_multinom, "Model 8_multinom") # Hinzufügen von elix_sum bietet keinen Vorteil im Modelfit
-
-# Ist char_sum ein besserer Prädiktor?
-model9_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + emp.type + char_sum_cent, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model9_multinom)
-add_model_summary(model9_multinom, "Model 9_multinom") # char_sum verbessert den Modelfit und ist ein signifikanter Prädiktor. Wieso ist char_sum besser als elix_sum?
-
-model10_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + emp.type + char_sum_cent + fost.degree_bin, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model10_multinom)
-add_model_summary(model10_multinom, "Model 10_multinom") # Keine Verbesserung durch Hinzufügen von fost.degree_bin (außer in deviance)
-
-model11_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + emp.type + char_sum_cent + ndistinctATClevel2_cent, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model11_multinom)
-add_model_summary(model11_multinom, "Model 11_multinom") # Keine Verbesserung gegenüber Modell 9 (außer in deviance)
-
-model12_multinom <- mblogit(formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + emp.type + char_sum_cent + ndistinctATClevel2_cent + REHA_count_before_qwt_cent, random = ~ 1 | pragmaid, data = final_data)
-getSummary.mblogit(model12_multinom)
-add_model_summary(model12_multinom, "Model 12_multinom")
-
-# Multinomiales Modell mit den gleichen Prädiktoren wie model13_log
-model13_multinom <- mblogit(
-  formula = treat_dur_cat ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + 
-            ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent,
-  random = ~ 1 | pragmaid, 
-  data = final_data
-)
-getSummary.mblogit(model13_multinom)
-add_model_summary(model13_multinom, "Model 13_multinom")
-
-# mit Interaktion
-model14_multinom <- mblogit(
-  formula = treat_dur_cat ~ sex + age_cent * qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + 
-            ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent,
-  random = ~ 1 | pragmaid, 
-  data = final_data
-)
-getSummary.mblogit(model14_multinom) #Interaktion nicht signifikant
-add_model_summary(model14_multinom, "Model 14_multinom")
-
-# Finde das beste Modell
-choose_best_model <- function(summary_df, criterion) {
-  if (!criterion %in% names(summary_df)) {
-    stop("Ungültiges Kriterium. Wähle entweder 'Deviance', 'AIC' oder 'BIC'.")
-  }
-  best_model_row <- summary_df[which.min(summary_df[[criterion]]), ]
-  return(best_model_row)
-}
-
-choose_best_model(model_summaries, "BIC") # Model 4_multinom
-choose_best_model(model_summaries, "AIC") # Model 9_multinom
-choose_best_model(model_summaries, "Deviance") # Model 11_multinom
-
-coefffix_plot <- sjPlot::plot_model(model14_multinom, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3, dot.size = 2, sort.est = TRUE)
-
-graph2doc(x = coefffix_plot, file=file.path(folder_plot, "coefffix_plot_qwt_multinom.png"), width=7, height=5)
-```
-# Check how results would change when excluding n.days_cat
-```{r exclude n.days_cat}
-model13.2_log <- glmmTMB(unpl_drop ~ sex + age_cent + qwt_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_qwt_cent + INPAT_count_before_qwt_cent + treat_dur_cat + (1|pragmaid), 
-                       family = "binomial", data = final_data) 
-summary(model13.2_log) 
-summary(model13_log) #emp.typeother wird signifikant
+```{r residuals}
+model_simres <- simulateResiduals(best_model)
+plot(model_simres)
 ```
