@@ -1221,3 +1221,7 @@ ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, width = 8
 model_simres <- simulateResiduals(best_model)
 plot(model_simres)
 ```
+Keine signifikante Abweichung in der Verteilung der Residuen (p-Wert des KS-Tests > 0.05).
+Keine Anzeichen von Überdispersion (Dispersionstest nicht signifikant).
+Keine Ausreißer (Outlier-Test p = 1).
+Visuell zeigen die Residuen keine systematischen Muster.
