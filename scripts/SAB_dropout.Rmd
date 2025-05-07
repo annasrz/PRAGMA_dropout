@@ -516,7 +516,7 @@ med_fost_diagnoses_SAB_employ_alltimes <- left_join(fost_diagnoses_SAB_employ, m
 nrow(distinct(med_fost_diagnoses_SAB_employ_alltimes, pragmaid)) 
 
 med_fost_diagnoses_SAB_employ_fil <- med_fost_diagnoses_SAB_employ_alltimes %>%
-  # only keep medication data that happend during the 3 months before the SAB
+  # only keep medication data that happened during the month before the SAB
   filter(date.medi.disp >= (date.treat.start - days(30)) & date.medi.disp <= date.treat.start) %>%
   filter(ATC != "")
 
@@ -566,9 +566,7 @@ hist(med_fost_diagnoses_SAB_employ$ndistinctATClevel2)
 ### Hinzufügen der Qualifizierten Entzugsbehandlung: QEB-ID (Wie viele QEB hat eine Person zum Zeitpunkt des SAB bereits gemacht?)
 
 ```{r QEB count}
-
-#Daten zusammenführen
-
+# Merge Data
 med_fost_diagnoses_SAB_employ_QEB <- bind_rows(
   med_fost_diagnoses_SAB_employ, QEB %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
@@ -593,8 +591,6 @@ med_fost_diagnoses_SAB_employ_QEB <- med_fost_diagnoses_SAB_employ_QEB %>% filte
 ## Hinzufügen der REHA ID (wie viele Rehabilitationsbehandlungen hat eine Person zum Zeitpunkt des SAB bereits gemacht?)
 
 ```{r reha count}
-#Daten zusammenführen
-
 med_fost_diagnoses_SAB_employ_QEB_reha <- bind_rows(
   med_fost_diagnoses_SAB_employ_QEB, reha %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
 
@@ -638,10 +634,10 @@ for (var in variables_to_center) {
 }
 ```
 
-# Interkorrelations Matrix (nur kontinuierliche Variablen)
+## Interkorrelations Matrix (nur kontinuierliche Variablen)
 
 ```{r correlation}
-cor_matrix <-  cor(final_data %>% select(c("age_cent", "SAB_id_cent", "elix_sum_cent", "ndistinctATClevel2_cent", "QEB_count_before_SAB_cent", "REHA_count_before_SAB_cent", "n.days_cent")))
+cor_matrix <-  cor(final_data %>% select(c("age_cent", "SAB_id_cent", "elix_sum_cent", "ndistinctATClevel2_cent", "QEB_count_before_SAB_cent", "REHA_count_before_SAB_cent")))
 cor_matrix
 cor_melted <- melt(cor_matrix)
 
@@ -908,13 +904,13 @@ best_model <- model12
 ## Model Diagnostik: ICC and R2
 ```{r model_iccr2}
 #R2 = proportion of the explained variance (of the full model)
-performance::r2_nakagawa(best_model) #conditional R2: 21.3%, marginal R2: 4.8%
+performance::r2_nakagawa(best_model) 
 
 # ICC = proportion of explained variance that can be attributed to the random effects
 residual_var <- pi^2 / 3
 random_effects_var <- as.numeric(VarCorr(best_model)$pragmaid[1])
 ICC <- random_effects_var / (random_effects_var + residual_var)
-print(ICC) #.173
+print(ICC) 
 performance::icc(best_model)
 
 # better modelfit than unconditional model?
@@ -922,6 +918,7 @@ anova(model1, best_model, test = "Chisq")
 ```
 
 ## Odds Ratios der signifikanten Prädiktoren
+
 ```{r odds_ratios}
 
 coefficents <- summary(best_model)$coefficients$cond[, 1]

@@ -492,7 +492,7 @@ table(all_diagnoses$icd_type)
 diagnoses_filtered <- all_diagnoses %>% 
   filter(pragmaid %in% total_employ$pragmaid) %>% 
   filter(icd_type %in% c("confirmed", "primary", "secondary", "any")) %>%
-  filter(icd.alc == FALSE) %>% #keep only diagnoses that are not alcohol related (as all SAB cases are alcohol related)
+  filter(icd.alc == FALSE) %>% #keep only diagnoses that are not alcohol related (as all QEB cases are alcohol related)
   mutate(length_diag = as.integer(difftime(as.Date(date.diag.end), as.Date(date.diag.start), units = "days"))) 
 
 
@@ -640,7 +640,7 @@ med_fost_diagnoses_employ_alltimes <- left_join(fost_diagnoses_employ, med_QEB, 
 nrow(distinct(med_fost_diagnoses_employ_alltimes, pragmaid))
 
 med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_alltimes %>%
-# only keep medication data that happend during the 3 months before the QEB
+# only keep medication data that happend during the month before the QEB
   filter(date.medi.disp >= (date.treat.start - days(30)) & date.medi.disp <= date.treat.start) %>%
   filter(ATC != "")
 
@@ -672,8 +672,7 @@ sorted_atc_counts <- med_fost_diagnoses_employ_fil %>%
 #calculate sum of distinct level 2 ATC codes per QEB-person combi
 med_fost_diagnoses_employ_fil <- med_fost_diagnoses_employ_fil %>%
   group_by(id_pragma_QEB) %>%
-  dplyr::summarize(ndistinctATClevel2 = n_distinct(Level2_ATC), 
-            ndistinctATC = n_distinct(ATC)) %>%
+  dplyr::summarize(ndistinctATClevel2 = n_distinct(Level2_ATC)) %>%
   ungroup()
 
 table(med_fost_diagnoses_employ_fil$ndistinctATClevel2)
@@ -708,7 +707,7 @@ for (var in variables_to_center) {
 }
 ```
 
-# Interkorrelations Matrix (nur kontinuierliche Variablen)
+## Interkorrelations Matrix (nur kontinuierliche Variablen)
 
 ```{r correlation}
 cor_matrix <-  cor(final_data %>% select(c("age_cent", "QEB_id_cent", "elix_sum_cent", "ndistinctATClevel2_cent", "REHA_count_before_QEB_cent", "SAB_count_before_QEB_cent", "n.days_cent")))
