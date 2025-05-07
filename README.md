@@ -31,11 +31,11 @@ Key Predictors:
 
 This repository includes one R script per treatment type:
 
-    SAB_analysis.R — Analysis of inpatient alcohol treatment episodes
+    SAB_analysis.Rmd — Analysis of inpatient alcohol treatment episodes
 
-    QEB_analysis.R — Analysis of qualified withdrawal treatment episodes
+    QEB_analysis.Rmd — Analysis of qualified withdrawal treatment episodes
 
-    REHA_analysis.R — Analysis of medical rehabilitation treatment episodes
+    REHA_analysis.Rmd — Analysis of medical rehabilitation treatment episodes
 
 Each script performs data preprocessing, model fitting (glmmTMB), and results output.
 
