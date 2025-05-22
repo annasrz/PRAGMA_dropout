@@ -36,16 +36,18 @@ invisible(lapply(packages, library, character.only = TRUE))
 DATE <- format(Sys.Date(), "%Y%m%d")
 
 # output folders
-folder_table <- file.path("..", "output/tables")
-folder_plot <- file.path("..", "output/figures")
+folders <- c(tables = "tables", figures = "figures", models = "models")
+paths <- file.path("..", "output", folders)
+names(paths) <- names(folders)
 
-if (!file.exists(folder_table)) {
-  dir.create(folder_table, recursive = TRUE)
-}
+# Create dirs
+invisible(lapply(paths, function(p) {
+  if (!dir.exists(p)) dir.create(p, recursive = TRUE)
+}))
 
-if (!file.exists(folder_plot)) {
-  dir.create(folder_plot, recursive = TRUE)
-}
+folder_table  <- paths["tables"]
+folder_plot   <- paths["figures"]
+folder_models <- paths["models"]
 ```
 
 ## Daten Import
@@ -899,10 +901,14 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
 
 ```{r best_model}
 best_model <- model12
+#save the best model for later use
+saveRDS(best_model, file = file.path(folder_models, "full_model_SAB.rds"))
 ```
 
 ## Model Diagnostik: ICC and R2
 ```{r model_iccr2}
+#load the best model (no need to run the model again)
+best_model <- readRDS(file.path(folder_models, "full_model_SAB.rds"))
 #R2 = proportion of the explained variance (of the full model)
 performance::r2_nakagawa(best_model) 
 
@@ -1030,7 +1036,7 @@ new_labels <- c(
   "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
   "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
   "elix_sum_cent" = "Elixhauser-Score",
-  "fost.degree_binja" = "Pflegestatus: vorhanden\n(Ref.: nicht vorhanden)",
+  "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
   "ndistinctATClevel2_cent" = "Anzahl Medikationen",
   "QEB_count_before_SAB_cent" = "Behandlungserfahrung QEB",
   "REHA_count_before_SAB_cent" = "Behandlungserfahrung REHA"
@@ -1049,7 +1055,40 @@ coefffix_plot <- coefffix_plot +
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_SAB.tif"), coefffix_plot, width = 8, height = 5, dpi = 700)
+ggsave(file.path(folder_plot, "coefffix_plot_SAB.tif"), coefffix_plot, width = 8, height = 5, dpi = 700, bg = "white")
+
+#same with english labels
+new_labels_en <- c(
+  "(Intercept)" = "Intercept", 
+  "age_cent" = "Age",
+  "SAB_id_cent" = "Treatment experience: INPAT",
+  "sexmale" = "Gender: male\n(Ref.: female)",
+  "nationalitynicht deutsch" = "Nationality: German\n(Ref.: non-German)",
+  "emp.typeother" = "Employment status: other\n(Ref.: employed)",
+  "emp.typeunemployed" = "Employment status: unemployed\n(Ref.: employed)",
+  "emp.typeretired" = "Employment status: retired\n(Ref.: employed)",
+  "elix_sum_cent" = "Elixhauser score",
+  "fost.degree_binnein" = "Care status: not present\n(Ref.: present)",
+  "ndistinctATClevel2_cent" = "Number of medications",
+  "QEB_count_before_SAB_cent" = "Treatment experience: QWT",
+  "REHA_count_before_SAB_cent" = "Treatment experience: REHA"
+)
+
+coefffix_plot_en <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels_en, title = "", color = c("blue", "red"),  axis.lim = c(0.6, 3), wrap.labels = 100)
+
+coefffix_plot_en <- coefffix_plot_en + 
+  #change size of axis labels
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 12),
+        plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
+  )
+
+coefffix_plot_en
+
+#save as tif
+ggsave(file.path(folder_plot, "coefffix_plot_SAB_en.tif"), coefffix_plot_en, width = 8, height = 5, dpi = 700, bg = "white")
+
+
 ```
 
 ## Model Checks und Diagnostiken

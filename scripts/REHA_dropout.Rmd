@@ -36,16 +36,18 @@ DATE <- format(Sys.Date(), "%Y%m%d")
 
 
 # output folders
-folder_table <- file.path("..", "output/tables")
-folder_plot <- file.path("..", "output/figures")
+folders <- c(tables = "tables", figures = "figures", models = "models")
+paths <- file.path("..", "output", folders)
+names(paths) <- names(folders) 
 
-if (!file.exists(folder_table)) {
-  dir.create(folder_table, recursive = TRUE)
-}
+# Create dirs if they do not exist
+invisible(lapply(paths, function(p) {
+  if (!dir.exists(p)) dir.create(p, recursive = TRUE)
+}))
 
-if (!file.exists(folder_plot)) {
-  dir.create(folder_plot, recursive = TRUE)
-}
+folder_table  <- paths["tables"]
+folder_plot   <- paths["figures"]
+folder_models <- paths["models"]
 ```
 
 ## Daten Import
@@ -817,10 +819,13 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
 
 ```{r best_model}
 best_model <- model11
+saveRDS(best_model, file = file.path(folder_models, "full_model_REHA.rds"))
 ```
 ## Model Diagnostik: ICC and R2
 
 ```{r model_iccr2}
+#load the best model (no need to run the model again)
+best_model <- readRDS(file.path(folder_models, "full_model_REHA.rds"))
 #R2 = proportion of the explained variance (of the full model)
 performance::r2_nakagawa(best_model)
 
@@ -965,7 +970,38 @@ coefffix_plot <- coefffix_plot +
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot, width = 7.5, height = 4.5, dpi = 700)
+ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot, width = 7.5, height = 4.5, dpi = 600, bg = "white")
+
+#same with english labels
+new_labels_en <- c(
+  "(Intercept)" = "Intercept", 
+  "age_cent" = "Age",
+  "reha_id_cent" = "Treatment experience: REHA",
+  "sexmale" = "Gender: male\n(Ref.: female)",
+  "STAATS_ANGEnicht deutsch" = "Nationality: German\n(Ref.: non-German)",
+  "emp.typeother" = "Employment status: other\n(Ref.: employed)",
+  "emp.typeunemployed" = "Employment status: unemployed\n(Ref.: employed)",
+  "elix_sum_cent" = "Elixhauser score",
+  "ndistinctATClevel2_cent" = "Number of medications",
+  "SAB_count_before_reha_cent" = "Treatment experience: INPAT",
+  "QEB_count_before_reha_cent" = "Treatment experience: QWT",
+  "MASSN_ARTstationäre Maßnahme" = "Treatment type: inpatient\n(Ref.: outpatient)",
+  "MASSN_ARTganztägig ambulante Maßnahme" = "Treatment type: full-day outpatient\n(Ref.: outpatient)"
+)
+
+coefffix_plot_en <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels_en, title = "", color = c("blue", "red"),  axis.lim = c(0.2, 2), wrap.labels = 100)
+
+coefffix_plot_en <- coefffix_plot_en + 
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 12),
+        plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
+        )
+  
+coefffix_plot_en
+
+#save as tif
+ggsave(file.path(folder_plot, "coefffix_plot_REHA_en.tif"), coefffix_plot_en, width = 7.5, height = 4.5, dpi = 600, bg = "white")
+
 ```
 ## Model Checks und Diagnostiken
 ```{r residuals}

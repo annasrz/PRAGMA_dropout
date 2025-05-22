@@ -36,16 +36,18 @@ invisible(lapply(packages, library, character.only = TRUE))
 DATE <- format(Sys.Date(), "%Y%m%d")
 
 # output folders
-folder_table <- file.path("..", "output/tables")
-folder_plot <- file.path("..", "output/figures")
+folders <- c(tables = "tables", figures = "figures", models = "models")
+paths <- file.path("..", "output", folders)
+names(paths) <- names(folders) 
 
-if (!file.exists(folder_table)) {
-  dir.create(folder_table, recursive = TRUE)
-}
+# Create dirs if they do not exist
+invisible(lapply(paths, function(p) {
+  if (!dir.exists(p)) dir.create(p, recursive = TRUE)
+}))
 
-if (!file.exists(folder_plot)) {
-  dir.create(folder_plot, recursive = TRUE)
-}
+folder_table  <- paths["tables"]
+folder_plot   <- paths["figures"]
+folder_models <- paths["models"]
 ```
 
 ## Daten Import
@@ -334,7 +336,7 @@ ENTL_ndays <- ggplot(QEB %>% filter (ENTL301 != "Tod"), aes(x = n.days, y = ENTL
 
 ENTL_ndays
 
-ggsave(file.path(folder_plot, "ENTL_ndays.tif"), ENTL_ndays, width = 12, height = 7, dpi = 700)
+ggsave(file.path(folder_plot, "ENTL_ndays.tif"), ENTL_ndays, width = 10, height = 6, dpi = 600, bg = "white")
 
 #calculate IQR for n.days only among regular discharges
 QEB %>% 
@@ -1056,10 +1058,13 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
 
 ```{r best_model}
 best_model <- model12
+saveRDS(best_model, file = file.path(folder_models, "full_model_QEB.rds"))
 ```
 
 ## Model Diagnostik: ICC and R2
 ```{r model_iccr2}
+#load the best model (no need to run the model again)
+best_model <- readRDS(file.path(folder_models, "full_model_QEB.rds"))
 #R2 = proportion of the explained variance (of the full model)
 performance::r2_nakagawa(best_model) 
 
@@ -1210,7 +1215,43 @@ coefffix_plot <- coefffix_plot +
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, width = 8, height = 7, dpi = 700)
+ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, width = 8, height = 7, dpi = 600, bg = "white")
+
+
+#same with english labels
+new_labels_en <- c(
+  "(Intercept)" = "Intercept", 
+  "agegroup35-44" = "Age: 35–44\n(Ref.: 18–34)",
+  "agegroup45-54" = "Age: 45–54\n(Ref.: 18–34)",
+  "agegroup55-64" = "Age: 55–64\n(Ref.: 18–34)",
+  "agegroup65+"   = "Age: 65+\n(Ref.: 18–34)",
+  "QEB_id_cent" = "Treatment experience: QWT",
+  "sexmale" = "Gender: male\n(Ref.: female)",
+  "nationalitynicht deutsch" = "Nationality: German\n(Ref.: non-German)",
+  "emp.typeother" = "Employment status: other\n(Ref.: employed)",
+  "emp.typeunemployed" = "Employment status: unemployed\n(Ref.: employed)",
+  "emp.typeretired" = "Employment status: retired\n(Ref.: employed)",
+  "elix_sum_cent" = "Elixhauser score",
+  "fost.degree_binnein" = "Care status: not present\n(Ref.: present)",
+  "ndistinctATClevel2_cent" = "Number of medications",
+  "SAB_count_before_QEB_cat1" = "Treatment experience INPAT: 1\n(Ref.: 0)",
+  "SAB_count_before_QEB_cat2" = "Treatment experience INPAT: 2\n(Ref.: 0)",
+  "SAB_count_before_QEB_cat3+" = "Treatment experience INPAT: 3+\n(Ref.: 0)",
+  "REHA_count_before_QEB_cent" = "Treatment experience: REHA"
+)
+
+coefffix_plot_en <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels_en, title = "", color = c("blue", "red"),  axis.lim = c(0.092, 3), wrap.labels = 100)
+
+coefffix_plot_en <- coefffix_plot_en + 
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 12),
+        plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
+        )
+
+coefffix_plot_en
+
+#save as tif
+ggsave(file.path(folder_plot, "coefffix_plot_QEB_en.tif"), coefffix_plot_en, width = 8, height = 7, dpi = 600, bg = "white")
 
 ```
 
