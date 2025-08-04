@@ -481,49 +481,165 @@ hist(med_diagnoses_reha_employ$ndistinctATClevel2)
 
 ```{r QEB count}
 
+# categorize ETNL301 to dropout in QEB 
+labels_entl301 <- c(
+  "1" = "regulär",
+  "2" = "beendet, nachstat. Beh. vorgesehen",
+  "3" = "aus sonstigen Gründen beendet",
+  "4" = "gegen ärztlichen Rat beendet",
+  "6" = "Verlegung in ein anderes Krankenhaus",
+  "7" = "Tod",
+  "9" = "Rehaeinrichtung",
+  "10" = "Pflegeeinrichtung",
+  "13" = "externe Verlegung zur psychiatrischen Behandlung",
+  "14" = "aus sonst. Gründen beend., nachstat. Beh. Vorges.",
+  "15" = "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.",
+  "17" = "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG",
+  "22" = "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."
+)
+
+QEB$ENTL301 <- factor(QEB$ENTL301, levels = names(labels_entl301), labels = labels_entl301)
+
+# Categorisation of ENTLASS reasons into ‘irregular termination’ (1 = yes; 2 = no) (1 = ja; 2 = nein)
+QEB <- QEB %>% 
+  filter(ENTL301 != "Tod") %>%
+  mutate(unpl_drop = factor(case_when(
+  ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
+  ENTL301 %in% c("regulär", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung",
+                 "externe Verlegung zur psychiatrischen Behandlung", "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
+  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
+
+
 # Merge Data
 med_diagnoses_reha_employ_QEB <- bind_rows(
-  med_diagnoses_reha_employ, QEB %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
+  med_diagnoses_reha_employ, QEB %>% select(pragmaid, date.treat.start, treatment, date.treat.end, unpl_drop))
 
 med_diagnoses_reha_employ_QEB <- med_diagnoses_reha_employ_QEB %>%
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(QEB_count_before_reha = sapply(1:n(), function(i) {
-    if (treatment[i] == "drvreha") {
-      sum(treatment[1:(i-1)] == "QEB" & date.treat.end[1:(i-1)] < date.treat.start[i])
-    } else {
-      NA
-    }
-  }))
+  mutate(
+    QEB_count_before_reha = sapply(1:n(), function(i) {
+      if (treatment[i] == "drvreha") {
+        sum(treatment[1:(i-1)] == "QEB" & date.treat.end[1:(i-1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    }),
+    unpl_within_12m_before = sapply(1:n(), function(i) {
+      if (treatment[i] == "drvreha") {
+        any(
+          treatment[1:(i-1)] %in% c("QEB", "drvreha") &
+          unpl_drop[1:(i-1)] == "ja" &
+          date.treat.end[1:(i-1)] >= (date.treat.start[i] - days(365)) &
+          date.treat.end[1:(i-1)] < date.treat.start[i]
+        )
+      } else {
+        NA
+      }
+    }),
+    unpl_within_12m_before = factor(
+      ifelse(is.na(unpl_within_12m_before), NA_integer_, as.integer(unpl_within_12m_before)),
+      levels = c(0, 1),
+      labels = c("nein", "ja")
+    )
+  )
+
 
 #check
+med_diagnoses_reha_employ_QEB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, unpl_within_12m_before, unpl_drop) %>% arrange(pragmaid, date.treat.start)
+table(med_diagnoses_reha_employ_QEB$QEB_count_before_reha)
 med_diagnoses_reha_employ_QEB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha) %>% arrange(pragmaid, date.treat.start) #okay
 med_diagnoses_reha_employ_QEB <- med_diagnoses_reha_employ_QEB %>% filter(treatment == "drvreha")
-
+table(med_diagnoses_reha_employ_QEB$unpl_within_12m_before)
 ```
 
 ### Hinzufügen der SAB ID (wie viele Stationäre Alkoholbehandlungen hat eine Person zum Zeitpunkt der REHAs bereits gemacht?)
 
 ```{r reha count}
 
-med_diagnoses_reha_employ_QEB_SAB <- bind_rows(
-  med_diagnoses_reha_employ_QEB, SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
+# categorize ENTL301 to dropout in SAB
+labels_entl301_SAB <- c(
+  "1" = "regulär",
+  "2" = "beendet, nachstat. Beh. vorgesehen",
+  "3" = "aus sonstigen Gründen beendet",
+  "4" = "gegen ärztlichen Rat beendet",
+  "6" = "Verlegung in ein anderes Krankenhaus",
+  "7" = "Tod",
+  "9" = "Rehaeinrichtung",
+  "10" = "Pflegeeinrichtung",
+  "14" = "aus sonst. Gründen beend., nachstat. Beh. Vorges.",
+  "15" = "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.",
+  "17" = "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG",
+  "22" = "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."
+)
 
-med_diagnoses_reha_employ_QEB_SAB <- med_diagnoses_reha_employ_QEB_SAB %>%
+SAB$ENTL301 <- factor(SAB$ENTL301, levels = names(labels_entl301_SAB), labels = labels_entl301_SAB)
+
+table(SAB$ENTL301, useNA = "always")
+
+# Categorisation of ENTLASS reasons into ‘irregular termination’ (1 = yes; 2 = no) (1 = ja; 2 = nein)
+SAB <- SAB %>% 
+  filter(ENTL301 != "Tod") %>%
+  mutate(unpl_drop = factor(case_when(
+  ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
+  ENTL301 %in% c("regulär", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung",
+                 "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
+  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
+
+
+
+med_diagnoses_reha_employ_QEB_SAB <- bind_rows(
+  med_diagnoses_reha_employ_QEB, SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end, unpl_drop)) 
+
+med_diagnoses_reha_employ_QEB_SAB <- bind_rows(
+  med_diagnoses_reha_employ_QEB,
+  SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end, unpl_drop)
+) %>%
+  arrange(pragmaid, date.treat.start) %>%
   group_by(pragmaid) %>%
-  arrange(date.treat.start) %>%
-  mutate(SAB_count_before_reha = sapply(1:n(), function(i) {
-    if (treatment[i] == "drvreha") {
-      sum(treatment[1:(i-1)] == "SAB" & date.treat.end[1:(i-1)] < date.treat.start[i])
-    } else {
-      NA
-    }
-  })) %>%
+  
+  # SAB-Zählung
+  mutate(
+    SAB_count_before_reha = sapply(1:n(), function(i) {
+      if (treatment[i] == "drvreha") {
+        sum(treatment[1:(i - 1)] == "SAB" & date.treat.end[1:(i - 1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    })
+  ) %>%
+  
+  # Hilfsvariable: SAB-Abbrüche innerhalb der letzten 12 Monate 
+  mutate(
+    sab_unpl_before = sapply(1:n(), function(i) {
+      if (treatment[i] == "drvreha") {
+        any(
+          treatment[1:(i - 1)] == "SAB" &
+            unpl_drop[1:(i - 1)] == "ja" &
+            date.treat.end[1:(i - 1)] >= (date.treat.start[i] - days(365)) &
+            date.treat.end[1:(i - 1)] < date.treat.start[i]
+        )
+      } else {
+        NA
+      }
+    }),
+    
+    # in den kletzten 12 Monaten kein Abbruch ans den vorherigen Treatments (="nein") und jetzt SAB-Abbruch: auf "ja" setzen
+    unpl_within_12m_before = case_when(
+      sab_unpl_before & unpl_within_12m_before == "nein" ~ "ja",
+      TRUE ~ unpl_within_12m_before
+    ),
+    
+    unpl_within_12m_before = factor(unpl_within_12m_before, levels = c("nein", "ja"))
+  ) %>%
+  
   ungroup()
 
 #check
 med_diagnoses_reha_employ_QEB_SAB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, SAB_count_before_reha) %>% arrange(pragmaid, date.treat.start)
-
+med_diagnoses_reha_employ_QEB_SAB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, SAB_count_before_reha, sab_unpl_before, unpl_within_12m_before, unpl_drop) %>% arrange(pragmaid, date.treat.start)
+table(med_diagnoses_reha_employ_QEB_SAB$unpl_within_12m_before)
+table(med_diagnoses_reha_employ_QEB_SAB$sab_unpl_before)
 med_diagnoses_reha_employ_QEB_SAB <- med_diagnoses_reha_employ_QEB_SAB %>% filter(treatment == "drvreha")
 
 ```
@@ -533,7 +649,7 @@ med_diagnoses_reha_employ_QEB_SAB <- med_diagnoses_reha_employ_QEB_SAB %>% filte
 
 ```{r select_vars}
 reha_final <- med_diagnoses_reha_employ_QEB_SAB  %>% 
-  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, DIAG_VERAEND, nationality, n.days, max_n_days, DAUER_REHA, DIAG1, BEWILLDIAG, date.treat.start, date.treat.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob, ENTLASSFORM, date.emp.start, date.emp.end, id_pragma_reha, treatment))
+  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, DIAG_VERAEND, nationality, n.days, max_n_days, sab_unpl_before, DAUER_REHA, DIAG1, BEWILLDIAG, date.treat.start, date.treat.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob, ENTLASSFORM, date.emp.start, date.emp.end, id_pragma_reha, treatment))
 
 ```
 
@@ -556,13 +672,13 @@ for (var in variables_to_center) {
 ```{r correlation}
 # correlation matrix
 cor_matrix <-  cor(reha_final %>% select(c("age_cent", "reha_id_cent", "elix_sum_cent", "ndistinctATClevel2_cent", "QEB_count_before_reha_cent", "SAB_count_before_reha_cent")))
-cor_melted <- melt(cor_matrix)
+cor_melted <- as.data.frame(as.table(cor_matrix))
 
 # plot as Heatmap
-ggplot(cor_melted, aes(Var1, Var2, fill = value)) +
+ggplot(cor_melted, aes(Var1, Var2, fill = Freq)) +
   geom_tile() +
   scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
-  geom_text(aes(label = round(value, 2)), vjust = 1) +
+  geom_text(aes(label = round(Freq, 2)), vjust = 1) +
   theme_minimal() +
   labs(x = "", y = "", title = "Correlation Heatmap") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -608,6 +724,7 @@ boxplot(reha_final$QEB_count_before_reha_cent)
 #SAB_count_before_reha
 boxplot(reha_final$SAB_count_before_reha_cent)
 
+
 ```
 ### Test der Modellannahme: Linearer Zusammenhang mit Logit des Outcomes
 
@@ -627,7 +744,7 @@ reha_final$logSAB_count_before_rehaInt <- log(reha_final$SAB_count_before_reha+1
 outcomes <- c("unpl_drop")
 
 
-predictors <- "sex + STAATS_ANGE + MASSN_ART + emp.type + age + logageInt + reha_id + logreha_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + QEB_count_before_reha + logQEB_count_before_rehaInt + SAB_count_before_reha + logSAB_count_before_rehaInt"
+predictors <- "sex + STAATS_ANGE + MASSN_ART + emp.type + unpl_within_12m_before + age + logageInt + reha_id + logreha_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + QEB_count_before_reha + logQEB_count_before_rehaInt + SAB_count_before_reha + logSAB_count_before_rehaInt"
 
 
 models <- list()
@@ -648,7 +765,7 @@ Es gibt keine signifikanten Interaktionseffekte, die darauf hindeuten, dass die 
 
 ```{r multicollinearity}
 
-vif_model <- glm(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent, data = reha_final, family = binomial)
+vif_model <- glm(unpl_drop ~ sex + unpl_within_12m_before +age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent, data = reha_final, family = binomial)
 car::vif(vif_model)
 
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
@@ -719,59 +836,68 @@ add_model_summary(model10, "Model 10")
 model11 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + (1|pragmaid), family = "binomial", data = reha_final) 
 summary(model11)
 add_model_summary(model11, "Model 11")
+
+model12 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + unpl_within_12m_before + (1|pragmaid), family = "binomial", data = reha_final) 
+summary(model12)
+add_model_summary(model12, "Model 12")
 ```
 
 ## Hinzunahme der Interaktionen mit reha_id
 ```{r interactions}
-model12 <- glmmTMB(unpl_drop ~ sex + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + age_cent*reha_id_cent + (1|pragmaid), family = 
-                     "binomial", data = reha_final) 
-summary(model12)
-add_model_summary(model12, "Model 12") 
-
-model13 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + sex*reha_id_cent + (1|pragmaid), family = 
+model13 <- glmmTMB(unpl_drop ~ sex + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ age_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model13)
-add_model_summary(model13, "Model 13")
+add_model_summary(model13, "Model 13") 
 
-model14 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + STAATS_ANGE*reha_id_cent + (1|pragmaid), family = 
+model14 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ sex*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model14)
 add_model_summary(model14, "Model 14")
 
-model15 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + emp.type*reha_id_cent + (1|pragmaid), family = 
+model15 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ STAATS_ANGE*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
-summary(model15) 
+summary(model15)
 add_model_summary(model15, "Model 15")
 
-model16 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + emp.type*reha_id_cent + (1|pragmaid), family = 
+model16 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ emp.type*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
-summary(model16)
+summary(model16) 
 add_model_summary(model16, "Model 16")
 
-model17 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + elix_sum_cent*reha_id_cent + (1|pragmaid), family = 
+model17 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ emp.type*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
-summary(model17) 
+summary(model17)
 add_model_summary(model17, "Model 17")
 
-model18 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + ndistinctATClevel2_cent*reha_id_cent + (1|pragmaid), family = 
+model18 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ elix_sum_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model18) 
 add_model_summary(model18, "Model 18")
 
-model19 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + MASSN_ART*reha_id_cent + (1|pragmaid), family = 
-                     "binomial", data = reha_final)
-summary(model19)
+model19 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ ndistinctATClevel2_cent*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final) 
+summary(model19) 
 add_model_summary(model19, "Model 19")
 
-model20 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + QEB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
+model20 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ MASSN_ART*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final)
-summary(model20) 
+summary(model20)
 add_model_summary(model20, "Model 20")
 
-model21 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + SAB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
+model21 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ QEB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final)
 summary(model21) 
 add_model_summary(model21, "Model 21")
+
+model22 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ SAB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final)
+summary(model22) 
+add_model_summary(model22, "Model 22")
+
+model23 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + SAB_count_before_reha_cent + unpl_within_12m_before*reha_id_cent + (1|pragmaid), family = 
+                     "binomial", data = reha_final)
+summary(model22) 
+add_model_summary(model22, "Model 22")
 ```
 
 ## Evaluation der Modelle
@@ -818,7 +944,7 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
 ## Modellauswahl
 
 ```{r best_model}
-best_model <- model11
+best_model <- model12
 saveRDS(best_model, file = file.path(folder_models, "full_model_REHA.rds"))
 ```
 ## Model Diagnostik: ICC and R2
@@ -890,6 +1016,9 @@ prop.table(table(reha_final$emp.type))
 #nationality
 prop.table(table(reha_final$STAATS_ANGE))
 
+#unpl_within_12m_before
+prop.table(table(reha_final$unpl_within_12m_before))
+
 #elix_sum
 summary(reha_final$elix_sum)
 
@@ -954,6 +1083,7 @@ new_labels <- c(
   "ndistinctATClevel2_cent" = "Anzahl Medikationen",
   "SAB_count_before_reha_cent" = "Behandlungserfahrung SAB",
   "QEB_count_before_reha_cent" = "Behandlungserfahrung QEB",
+  "unpl_within_12m_beforeja" = "Mind. 1 vorherige irreg. Beendigung\n(Ref.: keine)",
   "MASSN_ARTstationäre Maßnahme" = "Behandlungsart: stationär\n(Ref.: ambulant)",
   "MASSN_ARTganztägig ambulante Maßnahme" = "Behandlungsart: ganztägig ambulant\n(Ref.: ambulant)"
 )
@@ -971,36 +1101,36 @@ coefffix_plot
 
 #save as tif
 ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot, width = 7.5, height = 4.5, dpi = 600, bg = "white")
-
-#same with english labels
-new_labels_en <- c(
-  "(Intercept)" = "Intercept", 
-  "age_cent" = "Age",
-  "reha_id_cent" = "Treatment experience: REHA",
-  "sexmale" = "Gender: male\n(Ref.: female)",
-  "STAATS_ANGEnicht deutsch" = "Nationality: German\n(Ref.: non-German)",
-  "emp.typeother" = "Employment status: other\n(Ref.: employed)",
-  "emp.typeunemployed" = "Employment status: unemployed\n(Ref.: employed)",
-  "elix_sum_cent" = "Elixhauser score",
-  "ndistinctATClevel2_cent" = "Number of medications",
-  "SAB_count_before_reha_cent" = "Treatment experience: INPAT",
-  "QEB_count_before_reha_cent" = "Treatment experience: QWT",
-  "MASSN_ARTstationäre Maßnahme" = "Treatment type: inpatient\n(Ref.: outpatient)",
-  "MASSN_ARTganztägig ambulante Maßnahme" = "Treatment type: full-day outpatient\n(Ref.: outpatient)"
-)
-
-coefffix_plot_en <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels_en, title = "", color = c("blue", "red"),  axis.lim = c(0.2, 2), wrap.labels = 100)
-
-coefffix_plot_en <- coefffix_plot_en + 
-  theme_minimal() +
-  theme(axis.text.y = element_text(size = 12),
-        plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
-        )
-  
-coefffix_plot_en
+# 
+# #same with english labels
+# new_labels_en <- c(
+#   "(Intercept)" = "Intercept", 
+#   "age_cent" = "Age",
+#   "reha_id_cent" = "Treatment experience: REHA",
+#   "sexmale" = "Gender: male\n(Ref.: female)",
+#   "STAATS_ANGEnicht deutsch" = "Nationality: German\n(Ref.: non-German)",
+#   "emp.typeother" = "Employment status: other\n(Ref.: employed)",
+#   "emp.typeunemployed" = "Employment status: unemployed\n(Ref.: employed)",
+#   "elix_sum_cent" = "Elixhauser score",
+#   "ndistinctATClevel2_cent" = "Number of medications",
+#   "SAB_count_before_reha_cent" = "Treatment experience: INPAT",
+#   "QEB_count_before_reha_cent" = "Treatment experience: QWT",
+#   "MASSN_ARTstationäre Maßnahme" = "Treatment type: inpatient\n(Ref.: outpatient)",
+#   "MASSN_ARTganztägig ambulante Maßnahme" = "Treatment type: full-day outpatient\n(Ref.: outpatient)"
+# )
+# 
+# coefffix_plot_en <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels_en, title = "", color = c("blue", "red"),  axis.lim = c(0.2, 2), wrap.labels = 100)
+# 
+# coefffix_plot_en <- coefffix_plot_en + 
+#   theme_minimal() +
+#   theme(axis.text.y = element_text(size = 12),
+#         plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
+#         )
+#   
+# coefffix_plot_en
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_REHA_en.tif"), coefffix_plot_en, width = 7.5, height = 4.5, dpi = 600, bg = "white")
+#ggsave(file.path(folder_plot, "coefffix_plot_REHA_en.tif"), coefffix_plot_en, width = 7.5, height = 4.5, dpi = 600, bg = "white")
 
 ```
 ## Model Checks und Diagnostiken
