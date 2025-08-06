@@ -362,40 +362,172 @@ QEB_check <- QEB %>%
 QEB <- QEB %>% 
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(QEB_id = row_number() - 1) %>% # Start at 0 to align with the REHA_count_before_QEB and SAB_count_before_QEB variables, 
-# as they represent the number of treatments *before* the current one.
+  mutate(
+    QEB_id = row_number() - 1,  # Zählung beginnt bei 0
+
+    n_QEB_abgebrochen = cumsum(lag(unpl_drop == "ja", default = FALSE)),
+    n_QEB_regulaer    = cumsum(lag(unpl_drop != "ja", default = FALSE))
+  ) %>%
   ungroup()
+
+table(QEB$QEB_id, useNA = "always")
+table(QEB$n_QEB_abgebrochen, useNA = "always")
+table(QEB$n_QEB_regulaer, useNA = "always")
+QEB %>% select(pragmaid, date.treat.start, date.treat.end, QEB_id, n_QEB_abgebrochen, n_QEB_regulaer, unpl_drop) %>% arrange(pragmaid, date.treat.start)
 ```
 
 ### Hinzufügen von REHA ID (wie viele REHAs hat eine Person zum Zeitpunkt des QEB bereits gemacht?)
 
 ```{r QEB count}
 
+reha_full <- merge(
+  reha,
+  reha_new %>% select(pragmaid, date.treat.start, date.treat.end, ENTLASSFORM),
+  by = c("pragmaid", "date.treat.start", "date.treat.end"),
+  all.x = TRUE
+)
+  
+reha_full <- reha_full %>%
+  filter(is.na(ENTLASSFORM) | ENTLASSFORM != "verstorben") %>%
+  mutate(unpl_drop = factor(case_when(
+  ENTLASSFORM %in% c("disziplinarisch", "vorzeitig mit ärztlichem Einverständnis/vorzeitig gegen ärztlichen Rat") ~ 1,
+  ENTLASSFORM %in% c("regulär", "Wechsel der Durchführungsart", "verlegt", "vorzeitig auf ärztliche Veranlassung") ~ 0,
+  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")),
+    # NA als "unbekannt" setzen
+    unpl_drop = fct_explicit_na(unpl_drop, na_level = "unbekannt")
+  )
+
+
 QEB_reha <- bind_rows(
-  QEB, reha %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
+  QEB, reha_full %>% select(pragmaid, date.treat.start, treatment, date.treat.end, unpl_drop))
 
 QEB_reha <- QEB_reha %>%
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(REHA_count_before_QEB = sapply(1:n(), function(i) {
-    if (treatment[i] == "QEB") {
-      sum(treatment[1:(i-1)] == "reha" & date.treat.end[1:(i-1)] <= date.treat.start[i])
-    } else {
-      NA
-    }
-  }))
+  mutate(
+    REHA_count_before_QEB = sapply(1:n(), function(i) {
+      if (treatment[i] == "QEB") {
+        sum(
+          treatment[1:(i - 1)] == "reha" &
+            date.treat.end[1:(i - 1)] <= date.treat.start[i],
+          na.rm = TRUE
+        )
+      } else {
+        NA_integer_
+      }
+    }),
+    # Irreguläre Beendigungen vorheriger REHAs
+    n_REHA_abgebrochen = sapply(1:n(), function(i) {
+      if (treatment[i] == "QEB") {
+        sum(treatment[1:(i-1)] == "reha" & unpl_drop[1:(i-1)] == "ja" & date.treat.end[1:(i-1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    }),
+    n_REHA_regulaer = sapply(1:n(), function(i) {
+      if (treatment[i] == "QEB") {
+        sum(treatment[1:(i-1)] == "reha" & unpl_drop[1:(i-1)] != "ja" & date.treat.end[1:(i-1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    })) %>%
+  ungroup()
+    
+    
+    # # Irreguläre Beendigungen vorheriger REHAs
+    # reha_unpl_before = sapply(1:n(), function(i) {
+    #   if (treatment[i] == "QEB") {
+    #     relevant <- which(
+    #       treatment[1:(i - 1)] == "reha" &
+    #       date.treat.end[1:(i - 1)] >= (date.treat.start[i] - days(365)) &
+    #       date.treat.end[1:(i - 1)] < date.treat.start[i]
+    #     )
+    # 
+    #     if (length(relevant) == 0) {
+    #       return("nein")  # nichts 12 m davor
+    #     }
+    # 
+    #     if (any(unpl_drop[relevant] == "ja", na.rm = TRUE)) {
+    #       return("ja")
+    #     } else if (all(is.na(unpl_drop[relevant]))) {
+    #       return(NA_character_)
+    #     } else {
+    #       return("nein")
+    #     }
+    #   } else {
+    #     NA_character_
+    #   }
+    # }),
+    # 
+    # # Irreguläre Beendigungen vorheriger QEBs
+    # qeb_unpl_before = sapply(1:n(), function(i) {
+    #   if (treatment[i] == "QEB") {
+    #     relevant <- which(
+    #       treatment[1:(i - 1)] == "QEB" &
+    #       date.treat.end[1:(i - 1)] >= (date.treat.start[i] - days(365)) &
+    #       date.treat.end[1:(i - 1)] < date.treat.start[i]
+    #     )
+    # 
+    #     if (length(relevant) == 0) {
+    #       return("nein")
+    #     }
+    # 
+    #     if (any(unpl_drop[relevant] == "ja", na.rm = TRUE)) {
+    #       return("ja")
+    #     } else if (all(is.na(unpl_drop[relevant]))) {
+    #       return(NA_character_)
+    #     } else {
+    #       return("nein")
+    #     }
+    #   } else {
+    #     NA_character_
+    #   }
+    # }))
 
 #check
+QEB_reha %>% select(pragmaid, date.treat.start, date.treat.end, QEB_id, treatment, REHA_count_before_QEB, n_REHA_abgebrochen, unpl_drop) %>% arrange(pragmaid, date.treat.start)
 QEB_reha %>% select(pragmaid, date.treat.start, date.treat.end, QEB_id, treatment, REHA_count_before_QEB) %>% arrange(pragmaid, date.treat.start)
 
+table(QEB_reha[QEB_reha$treatment == "QEB", ]$REHA_count_before_QEB, useNA = "always")
+table(QEB_reha[QEB_reha$treatment == "QEB", ]$n_REHA_regulaer, useNA = "always")
+table(QEB_reha[QEB_reha$treatment == "QEB", ]$n_REHA_abgebrochen, useNA = "always")
 QEB_reha <- QEB_reha %>% filter(treatment == "QEB")
-
 ```
 
 ### Hinzufügen von SAB ID (wie viele SABs hat eine Person zum Zeitpunkt des QEB bereits gemacht?)
 
 ```{r SAB count}
-QEB_reha_SAB <- bind_rows(QEB_reha, SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end))
+# categorize ENTL301 to dropout in SAB
+labels_entl301_SAB <- c(
+  "1" = "regulär",
+  "2" = "beendet, nachstat. Beh. vorgesehen",
+  "3" = "aus sonstigen Gründen beendet",
+  "4" = "gegen ärztlichen Rat beendet",
+  "6" = "Verlegung in ein anderes Krankenhaus",
+  "7" = "Tod",
+  "9" = "Rehaeinrichtung",
+  "10" = "Pflegeeinrichtung",
+  "14" = "aus sonst. Gründen beend., nachstat. Beh. Vorges.",
+  "15" = "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.",
+  "17" = "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG",
+  "22" = "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh."
+)
+
+SAB$ENTL301 <- factor(SAB$ENTL301, levels = names(labels_entl301_SAB), labels = labels_entl301_SAB)
+
+table(SAB$ENTL301, useNA = "always")
+
+# Categorisation of ENTLASS reasons into ‘irregular termination’ (1 = yes; 2 = no) (1 = ja; 2 = nein)
+SAB <- SAB %>% 
+  filter(ENTL301 != "Tod") %>%
+  mutate(unpl_drop = factor(case_when(
+  ENTL301 %in% c("aus sonstigen Gründen beendet", "gegen ärztlichen Rat beendet", "gegen ärztlichen Rat beendet, nachstat. Beh. vorgeseh.") ~ 1,
+  ENTL301 %in% c("regulär", "beendet, nachstat. Beh. vorgesehen", "Verlegung in ein anderes Krankenhaus", "Rehaeinrichtung", "Pflegeeinrichtung",
+                 "aus sonst. Gründen beend., nachstat. Beh. Vorges.", "interne Verlegung m. Wechsel zw. D. Gelt.b. BPflV u. KHEntgG", "Fallabschl. (int. V.) b. Wechsel zw. Voll- und teilst. Beh.") ~ 0,
+  TRUE ~ NA_real_), levels = c(0, 1), labels = c("nein", "ja")))
+
+
+QEB_reha_SAB <- bind_rows(QEB_reha, SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end, unpl_drop))
 
 QEB_reha_SAB <- QEB_reha_SAB %>%
   group_by(pragmaid) %>%
@@ -406,9 +538,63 @@ QEB_reha_SAB <- QEB_reha_SAB %>%
     } else {
       NA
     }
-  }))
+  }),
+      # Irreguläre Beendigungen vorheriger SABs
+    n_SAB_abgebrochen = sapply(1:n(), function(i) {
+      if (treatment[i] == "QEB") {
+        sum(treatment[1:(i-1)] == "SAB" & unpl_drop[1:(i-1)] == "ja" & date.treat.end[1:(i-1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    }),
+  n_SAB_regulaer = sapply(1:n(), function(i) {
+    if (treatment[i] == "QEB") {
+      sum(treatment[1:(i-1)] == "SAB" & unpl_drop[1:(i-1)] != "ja" & date.treat.end[1:(i-1)] < date.treat.start[i])
+    } else {
+      NA
+    }
+  })) %>%
+  ungroup()
+  # sab_unpl_before = sapply(1:n(), function(i) {
+  #     if (treatment[i] == "QEB") {
+  #       relevant <- which(
+  #         treatment[1:(i - 1)] == "SAB" &
+  #         date.treat.end[1:(i - 1)] >= (date.treat.start[i] - days(365)) &
+  #         date.treat.end[1:(i - 1)] < date.treat.start[i]
+  #       )
+  # 
+  #       if (length(relevant) == 0) {
+  #         return("nein")
+  #       }
+  # 
+  #       if (any(unpl_drop[relevant] == "ja", na.rm = TRUE)) {
+  #         return("ja")
+  #       } else if (all(is.na(unpl_drop[relevant]))) {
+  #         return(NA_character_)
+  #       } else {
+  #         return("nein")
+  #       }
+  #     } else {
+  #       NA_character_
+  #     }
+  #   }),
+  # 
+  #   # 4. Final: Dreistufige Zusammenfassung
+  #   unpl_within_12m_before_3cat = case_when(
+  #     treatment == "QEB" & (reha_unpl_before == "ja" | qeb_unpl_before == "ja" | sab_unpl_before == "ja") ~ "ja",
+  #     treatment == "QEB" & (reha_unpl_before == "nein" & qeb_unpl_before == "nein" & sab_unpl_before == "nein") ~ "nein",
+  #     treatment == "QEB" ~ "unbekannt",
+  #     TRUE ~ NA_character_  # für andere Treatments leer lassen
+  #   ),
+  # 
+  #   unpl_within_12m_before_3cat = factor(unpl_within_12m_before_3cat,
+  #                                        levels = c("nein", "ja", "unbekannt"))
+  # ) %>%
+  # ungroup()
+  # 
 
 #check
+QEB_reha_SAB %>% select(pragmaid, date.treat.start, QEB_id, treatment, unpl_drop, n_REHA_abgebrochen, n_SAB_abgebrochen) %>% arrange(pragmaid, date.treat.start) 
 QEB_reha_SAB %>% select(pragmaid, date.treat.start, QEB_id, treatment, REHA_count_before_QEB, SAB_count_before_QEB, REHA_count_before_QEB) %>% arrange(pragmaid, date.treat.start) 
 
 QEB_reha_SAB <- QEB_reha_SAB %>% filter(treatment == "QEB")
@@ -692,7 +878,8 @@ hist(med_fost_diagnoses_employ$ndistinctATClevel2)
 ## Auswahl relevanter Variablen
 ```{r select_vars}
 final_data <- med_fost_diagnoses_employ %>% 
-  select(-c(KH_FALL_ID, date.kkh.start, date.kkh.end, date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_QEB, fost.degree, source, icd.primary, icd.secondary, icd.admission, icd.other, died, date.death, ward, yob))
+  select(-c(KH_FALL_ID, date.kkh.start, date.kkh.end, date.treat.start, date.treat.end, date.emp.start, date.emp.end, id_pragma_QEB, fost.degree, source, icd.primary, icd.secondary, icd.admission, icd.other, died, date.death, ward, yob, REHA_count_before_QEB, SAB_count_before_QEB, QEB_id))
+final_data <- final_data %>% ungroup()
 ```
 
 ## Zentrieren der kontinuierlichen Variablen
@@ -701,7 +888,7 @@ Alle kontinuierlichen Variablen werden zentriert (d. h. der Mittelwert subtrahie
 
 ```{r center}  
 
-variables_to_center <- c("age", "QEB_id", "elix_sum", "ndistinctATClevel2", "SAB_count_before_QEB", "REHA_count_before_QEB", "n.days")
+variables_to_center <- c("age", "elix_sum", "ndistinctATClevel2", "n.days", "n_QEB_abgebrochen", "n_REHA_abgebrochen", "n_SAB_abgebrochen", "n_REHA_regulaer", "n_SAB_regulaer", "n_QEB_regulaer")
 
 #centering
 for (var in variables_to_center) {
@@ -712,16 +899,19 @@ for (var in variables_to_center) {
 ## Interkorrelations Matrix (nur kontinuierliche Variablen)
 
 ```{r correlation}
-cor_matrix <-  cor(final_data %>% select(c("age_cent", "QEB_id_cent", "elix_sum_cent", "ndistinctATClevel2_cent", "REHA_count_before_QEB_cent", "SAB_count_before_QEB_cent", "n.days_cent")))
+cent_vars <- names(final_data)[grepl("_cent$", names(final_data))]
+
+cor_matrix <- cor(final_data %>% select(all_of(cent_vars)), use = "pairwise.complete.obs")
+  
 cor_matrix
-cor_melted <- melt(cor_matrix)
+cor_melted <- as.data.frame(as.table(cor_matrix))
 
 # Erstelle die Heatmap
-ggplot(cor_melted, aes(Var1, Var2, fill = value)) +
+ggplot(cor_melted, aes(Var1, Var2, fill = Freq)) +
   geom_tile() +
   scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
   #add correlation values as text
-  geom_text(aes(label = round(value, 2)), vjust = 1) +
+  geom_text(aes(label = round(Freq, 2)), vjust = 1) +
   theme_minimal() +
   labs(x = "", y = "", title = "Correlation Heatmap") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
@@ -747,6 +937,11 @@ final_data$gkv <- as.factor(final_data$gkv)
 final_data$pragmaid <- as.factor(final_data$pragmaid)
 final_data$sex <- as.factor(final_data$sex)
 final_data$nationality <- as.factor(final_data$nationality)
+# final_data$reha_unpl_before <- final_data$reha_unpl_before %>%
+#   fct_explicit_na(na_level = "unbekannt") %>%
+#   factor(levels = c("nein", "ja", "unbekannt"))
+#final_data$qeb_unpl_before <- as.factor(final_data$qeb_unpl_before)
+#final_data$sab_unpl_before <- as.factor(final_data$sab_unpl_before)
 
 #check for missings
 summary(final_data) #7 NAs in EmpType -> set to "other"
@@ -754,7 +949,7 @@ final_data$gkv <- as.factor(final_data$gkv)
 final_data$emp.type[is.na(final_data$emp.type)] <- "other"
 
 # QEB_id
-boxplot(final_data$QEB_id) # some patients did a lot of QEBs
+#boxplot(final_data$QEB_id) # some patients did a lot of QEBs
 
 # ndays
 boxplot(final_data$n.days)
@@ -767,6 +962,25 @@ boxplot(final_data$elix_sum)
 
 #ndistinctATClevel2
 boxplot(final_data$ndistinctATClevel2)
+
+
+#n_QEB_abgebrochen
+boxplot(final_data$n_QEB_abgebrochen)
+
+#n_REHA_abgebrochen
+boxplot(final_data$n_REHA_abgebrochen)
+
+#n_SAB_abgebrochen
+boxplot(final_data$n_SAB_abgebrochen)
+
+#n_REHA_regulaer
+boxplot(final_data$n_REHA_regulaer)
+
+#n_SAB_regulaer
+boxplot(final_data$n_SAB_regulaer)
+
+#n_QEB_regulaer
+boxplot(final_data$n_QEB_regulaer)
 ```
 
 ### Test der Modellannahme: Linearer Zusammenhang mit Logit des Outcomes
@@ -777,18 +991,24 @@ Relevant ist nur, ob die Interaktionstermine signifikant sind. Jede signifikante
 ```{r linearity_test}
 # Create the interaction terms of the metric predictors with their logarithm
 final_data$logageInt <- log(final_data$age+1) * final_data$age
-final_data$logQEB_idInt <- log(final_data$QEB_id+1) * final_data$QEB_id
+# final_data$logQEB_idInt <- log(final_data$QEB_id+1) * final_data$QEB_id
 final_data$logelix_sumInt <- log(final_data$elix_sum+1) * final_data$elix_sum
 final_data$logndistinctATClevel2Int <- log(final_data$ndistinctATClevel2+1) * final_data$ndistinctATClevel2
-final_data$logREHA_count_before_QEBInt <- log(final_data$REHA_count_before_QEB+1) * final_data$REHA_count_before_QEB
-final_data$logSAB_count_before_QEBInt <- log(final_data$SAB_count_before_QEB+1) * final_data$SAB_count_before_QEB
+#final_data$logREHA_count_before_QEBInt <- log(final_data$REHA_count_before_QEB+1) * final_data$REHA_count_before_QEB
+# final_data$logSAB_count_before_QEBInt <- log(final_data$SAB_count_before_QEB+1) * final_data$SAB_count_before_QEB
+final_data$logn_QEB_abgebrochenInt <- log(final_data$n_QEB_abgebrochen+1) * final_data$n_QEB_abgebrochen
+final_data$logn_REHA_abgebrochenInt <- log(final_data$n_REHA_abgebrochen+1) * final_data$n_REHA_abgebrochen
+final_data$logn_SAB_abgebrochenInt <- log(final_data$n_SAB_abgebrochen+1) * final_data$n_SAB_abgebrochen
+final_data$logn_QEB_regulaerInt <- log(final_data$n_QEB_regulaer+1) * final_data$n_QEB_regulaer
+final_data$logn_REHA_regulaerInt <- log(final_data$n_REHA_regulaer+1) * final_data$n_REHA_regulaer
+final_data$logn_SAB_regulaerInt <- log(final_data$n_SAB_regulaer+1) * final_data$n_SAB_regulaer
 
 
 
 outcomes <- c("unpl_drop")
 
 
-predictors <- "sex + nationality + emp.type + age + fost.degree_bin + logageInt + QEB_id + logQEB_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + REHA_count_before_QEB + logREHA_count_before_QEBInt + SAB_count_before_QEB + logSAB_count_before_QEBInt"
+predictors <- "sex + nationality + emp.type + age + fost.degree_bin + logageInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + logn_QEB_abgebrochenInt + n_QEB_abgebrochen + logn_REHA_abgebrochenInt + n_REHA_abgebrochen + logn_SAB_abgebrochenInt + n_SAB_abgebrochen + logn_QEB_regulaerInt + n_QEB_regulaer + logn_REHA_regulaerInt + n_REHA_regulaer + logn_SAB_regulaerInt + n_SAB_regulaer"
 
 
 models <- list()
@@ -803,93 +1023,200 @@ for (outcome in outcomes) {
 
 ```
 
-logageInt und logSAB_count_before_QEBInt sind signifikant -> Annahme der Linearität im Logit verletzt
+logageInt und logSAB_count_before_QEBInt sind signifikant (und logQEB_idInt) -> Annahme der Linearität im Logit verletzt
+update: logn_QEB_abgebrochenInt, logn_SAB_abgebrochenInt, n_QEB_regulaer
 
 #### Sind Log-Tranformationen geeignet?
 ```{r check_log_transformation}
 
 #age
-data_test_age <- final_data %>%
-  mutate(bin = cut(age, breaks = 10)) %>%
+# data_test_age <- final_data %>%
+#   mutate(bin = cut(age, breaks = 10)) %>%
+#   group_by(bin) %>%
+#   summarise(
+#     mean_pred = mean(age, na.rm = TRUE),
+#     p = mean(as.numeric(unpl_drop), na.rm = TRUE),
+#     logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit transformation with Laplace correction (if p = 0 or p = 1)
+#     n = n()
+#   )
+# 
+# ggplot(data_test_age, aes(x = mean_pred, y = logit_p)) +
+#   geom_point() +
+#   geom_smooth(method = "loess", color = "red", se = FALSE) +
+#   geom_text(aes(label = n), hjust = 0, vjust = 0) +
+#   labs(
+#     title = "Überprüfung der log-linearen Beziehung: Alter",
+#     x = "Prädiktor age",
+#     y = "Logit(P(Y=1))"
+#   )
+
+# #SAB_count_before_QEB
+# data_test_SAB_count_before_QEB <- final_data %>%
+#   mutate(bin = cut(SAB_count_before_QEB, breaks = 10)) %>%
+#   group_by(bin) %>%
+#   summarise(
+#     mean_pred = mean(SAB_count_before_QEB, na.rm = TRUE),
+#     p = mean(as.numeric(unpl_drop), na.rm = TRUE),
+#     logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit transformation with Laplace correction (if p = 0 or p = 1)
+#     n = n()
+#   )
+# 
+# ggplot(data_test_SAB_count_before_QEB, aes(x = mean_pred, y = logit_p)) +
+#   geom_point() +
+#   geom_smooth(method = "loess", color = "red", se = FALSE) +
+#   geom_text(aes(label = n), hjust = 0, vjust = 0) +
+#   labs(
+#     title = "Überprüfung der log-linearen Beziehung: SAB_count_before_QEB",
+#     x = "Prädiktor SAB_count_before_QEB",
+#     y = "Logit(P(Y=1))"
+#   )
+
+#QEB_id
+data_test_QEB_reg <- final_data %>%
+  mutate(bin = cut(n_QEB_regulaer, breaks = 10)) %>%
   group_by(bin) %>%
   summarise(
-    mean_pred = mean(age, na.rm = TRUE),
+    mean_pred = mean(n_QEB_regulaer, na.rm = TRUE),
     p = mean(as.numeric(unpl_drop), na.rm = TRUE),
     logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit transformation with Laplace correction (if p = 0 or p = 1)
     n = n()
   )
 
-ggplot(data_test_age, aes(x = mean_pred, y = logit_p)) +
+ggplot(data_test_QEB_reg, aes(x = mean_pred, y = logit_p)) +
   geom_point() +
   geom_smooth(method = "loess", color = "red", se = FALSE) +
   geom_text(aes(label = n), hjust = 0, vjust = 0) +
   labs(
-    title = "Überprüfung der log-linearen Beziehung: Alter",
-    x = "Prädiktor age",
+    title = "Überprüfung der log-linearen Beziehung: n_QEB_regulaer",
+    x = "Prädiktor QEB_id",
     y = "Logit(P(Y=1))"
   )
 
-#SAB_count_before_QEB
-data_test_SAB_count_before_QEB <- final_data %>%
-  mutate(bin = cut(SAB_count_before_QEB, breaks = 10)) %>%
+
+#n_QEB_abgebrochen
+data_test_n_QEB_abgebrochen <- final_data %>%
+  mutate(bin = cut(n_QEB_abgebrochen, breaks = 10)) %>%
   group_by(bin) %>%
   summarise(
-    mean_pred = mean(SAB_count_before_QEB, na.rm = TRUE),
+    mean_pred = mean(n_QEB_abgebrochen, na.rm = TRUE),
     p = mean(as.numeric(unpl_drop), na.rm = TRUE),
     logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit transformation with Laplace correction (if p = 0 or p = 1)
     n = n()
   )
 
-ggplot(data_test_SAB_count_before_QEB, aes(x = mean_pred, y = logit_p)) +
+ggplot(data_test_n_QEB_abgebrochen, aes(x = mean_pred, y = logit_p)) +
   geom_point() +
   geom_smooth(method = "loess", color = "red", se = FALSE) +
   geom_text(aes(label = n), hjust = 0, vjust = 0) +
   labs(
-    title = "Überprüfung der log-linearen Beziehung: SAB_count_before_QEB",
-    x = "Prädiktor SAB_count_before_QEB",
+    title = "Überprüfung der log-linearen Beziehung: n_QEB_abgebrochen",
+    x = "Prädiktor n_QEB_abgebrochen",
     y = "Logit(P(Y=1))"
   )
 
+
+#n_SAB_abgebrochen
+data_test_n_SAB_abgebrochen <- final_data %>%
+  mutate(bin = cut(n_SAB_abgebrochen, breaks = 10)) %>%
+  group_by(bin) %>%
+  summarise(
+    mean_pred = mean(n_SAB_abgebrochen, na.rm = TRUE),
+    p = mean(as.numeric(unpl_drop), na.rm = TRUE),
+    logit_p = log(p + 0.001 / (1 - p + 0.001)),  # Logit transformation with Laplace correction (if p = 0 or p = 1)
+    n = n()
+  )
+
+ggplot(data_test_n_SAB_abgebrochen, aes(x = mean_pred, y = logit_p)) +
+  geom_point() +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  geom_text(aes(label = n), hjust = 0, vjust = 0) +
+  labs(
+    title = "Überprüfung der log-linearen Beziehung: n_SAB_abgebrochen",
+    x = "Prädiktor n_SAB_abgebrochen",
+    y = "Logit(P(Y=1))"
+  )
 
 ```
 Logarithmische Transformationen der Prädiktoren scheinen eher ungeeignet zu sein. Daher werden stattdessen Kategorien erstellt.
 
-#### Kategorisierung von Alter und SAB_count_before_QEB
+#### Kategorisierung von Alter, SAB_count_before_QEB und QEB_id
 ```{r categorize}
-tertile_limits_i <- quantile(final_data$SAB_count_before_QEB[final_data$SAB_count_before_QEB > 0], probs = c(0.33, 0.66))
+# tertile_limits_i <- quantile(final_data$SAB_count_before_QEB[final_data$SAB_count_before_QEB > 0], probs = c(0.33, 0.66))
+# 
+# final_data <- final_data %>% mutate(
+#   SAB_count_before_QEB_cat = case_when(
+#     SAB_count_before_QEB == 0 ~ "0",
+#     SAB_count_before_QEB <= tertile_limits_i[1] ~ "1",
+#     SAB_count_before_QEB <= tertile_limits_i[2] ~ "2",
+#     TRUE ~ "3+") %>% factor(levels = c("0", "1", "2", "3+"))
+# )
+# 
+# # Check
+# table(final_data$SAB_count_before_QEB_cat, final_data$SAB_count_before_QEB, useNA = "always")
+# table(final_data$SAB_count_before_QEB_cat)
+# 
+# 
+# 
+# final_data <- final_data %>% mutate(
+#   agegroup = case_when(
+#     age <=34 ~ "18-34",
+#     age <=44 ~ "35-44",
+#     age <=54 ~ "45-54",
+#     age <=64 ~ "55-64",
+#     TRUE ~ "65+"
+#   ) %>% factor(levels = c("18-34", "35-44", "45-54", "55-64", "65+"))
+# )
+# 
+# table(final_data$agegroup, final_data$age, useNA = "always")
+# table(final_data$agegroup)
+
+#QEB id regulär
+limits_n_QEB_reg <- quantile(final_data$n_QEB_regulaer[final_data$n_QEB_regulaer > 0], probs = c(0.5))
 
 final_data <- final_data %>% mutate(
-  SAB_count_before_QEB_cat = case_when(
-    SAB_count_before_QEB == 0 ~ "0",
-    SAB_count_before_QEB <= tertile_limits_i[1] ~ "1",
-    SAB_count_before_QEB <= tertile_limits_i[2] ~ "2",
-    TRUE ~ "3+") %>% factor(levels = c("0", "1", "2", "3+"))
+  n_QEB_reg_cat = case_when(
+    n_QEB_regulaer == 0 ~ "0",
+    n_QEB_regulaer <= limits_n_QEB_reg[1] ~ "1-2",
+    TRUE ~ "3+"
+  ) %>% factor(levels = c("0", "1-2", "3+"))
 )
 
-# Check
-table(final_data$SAB_count_before_QEB_cat, final_data$SAB_count_before_QEB, useNA = "always")
-table(final_data$SAB_count_before_QEB_cat)
+table(final_data$n_QEB_regulaer, final_data$n_QEB_reg_cat, useNA = "always")
+table(final_data$n_QEB_reg_cat)
 
-
-
+#n_QEB_abgebrochen
+table(final_data$n_QEB_abgebrochen, useNA = "always")
+limits_n_QEB_abgebrochen <- quantile(final_data$n_QEB_abgebrochen[final_data$n_QEB_abgebrochen > 0], probs = c(0.5))
 final_data <- final_data %>% mutate(
-  agegroup = case_when(
-    age <=34 ~ "18-34",
-    age <=44 ~ "35-44",
-    age <=54 ~ "45-54",
-    age <=64 ~ "55-64",
-    TRUE ~ "65+"
-  ) %>% factor(levels = c("18-34", "35-44", "45-54", "55-64", "65+"))
+  n_QEB_abgebrochen_cat = case_when(
+    n_QEB_abgebrochen == 0 ~ "0",
+    n_QEB_abgebrochen <= limits_n_QEB_abgebrochen[1] ~ "1",
+    TRUE ~ "2+"
+  ) %>% factor(levels = c("0", "1", "2+"))
 )
 
-table(final_data$agegroup, final_data$age, useNA = "always")
-table(final_data$agegroup)
+table(final_data$n_QEB_abgebrochen_cat, final_data$n_QEB_abgebrochen, useNA = "always")
+
+
+#n_SAB_abgebrochen
+table(final_data$n_SAB_abgebrochen, useNA = "always")
+limits_n_SAB_abgebrochen <- quantile(final_data$n_SAB_abgebrochen[final_data$n_SAB_abgebrochen > 0], probs = c(0.5))
+final_data <- final_data %>% mutate(
+  n_SAB_abgebrochen_cat = case_when(
+    n_SAB_abgebrochen == 0 ~ "0",
+    n_SAB_abgebrochen <= limits_n_SAB_abgebrochen[1] ~ "1",
+    TRUE ~ "2+"
+  ) %>% factor(levels = c("0", "1", "2+"))
+)
+
+table(final_data$n_SAB_abgebrochen_cat, final_data$n_SAB_abgebrochen, useNA = "always")
 ```
 
 # check for multicollinearity
 ```{r multicollinearity}
-vif_model_ENTL <- glm(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat, data = final_data, family = "binomial")
-
+vif_model_ENTL <- glm(unpl_drop ~ sex + age_cent + nationality  + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + n_REHA_abgebrochen + n_SAB_abgebrochen_cat + n_QEB_abgebrochen_cat + n_QEB_reg_cat + n_REHA_regulaer + n_SAB_regulaer_cent,
+                      data = final_data, family = "binomial")
+#unpl_within_12m_before_3cat
 car::vif(vif_model_ENTL)
 #"... when using adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
 ```
@@ -928,90 +1255,104 @@ model3 <- glmmTMB(unpl_drop ~ sex + agegroup + (1|pragmaid), family = "binomial"
 summary(model3)
 add_model_summary(model3, "Model 3")
 
-model4 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
+model4 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + (1|pragmaid), family = "binomial", data = final_data)
 summary(model4)
 add_model_summary(model4, "Model 4")
+plot(ggeffects::ggpredict(model4, terms = c("QEB_id_cat", "qeb_unpl_before")))
 
-model5 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + (1|pragmaid), family = "binomial", data = final_data)
+
+model5 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + (1|pragmaid), family = "binomial", data = final_data)
 summary(model5)
 add_model_summary(model5, "Model 5")
 
-model6 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
+model6 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + (1|pragmaid), family = "binomial", data = final_data)
 summary(model6)
 add_model_summary(model6, "Model 6")
 
-model7 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
+model7 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
 summary(model7)
 add_model_summary(model7, "Model 7")
 
-model8 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + (1|pragmaid), 
+model8 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + fost.degree_bin + (1|pragmaid), 
                       family = "binomial", data = final_data)
 summary(model8)
 add_model_summary(model8, "Model 8")
 
-model9 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
+model9 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model9)
 add_model_summary(model9, "Model 9")
 
-model10 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
+model10 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model10)
 add_model_summary(model10, "Model 10")
 
-model11 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + (1|pragmaid), 
+model11 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model11)
 add_model_summary(model11, "Model 11")
 
-model12 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + (1|pragmaid), 
+model12 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + (1|pragmaid), 
                        family = "binomial", data = final_data)
 summary(model12)
 add_model_summary(model12, "Model 12")
+
+model13 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat +
+                     qeb_unpl_before + (1|pragmaid), 
+                       family = "binomial", data = final_data)
+summary(model13)
+add_model_summary(model13, "Model 13")
+
+model14 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cat*qeb_unpl_before + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent*reha_unpl_before + SAB_count_before_QEB_cat + (1|pragmaid), 
+                       family = "binomial", data = final_data)
+summary(model14)
+add_model_summary(model14, "Model 14")
+
+
+model15 <- glmmTMB(unpl_drop ~ sex + age_cent + nationality  + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + n_REHA_abgebrochen_cent +  n_QEB_abgebrochen_cat + n_SAB_abgebrochen_cat + n_QEB_reg_cat + n_REHA_regulaer_cent + n_SAB_regulaer_cent + (1|pragmaid), 
+                       family = "binomial", data = final_data)
+summary(model15)
+add_model_summary(model15, "Model 15")
+
+#plot(ggeffects::ggpredict(model15, terms = c("SAB_count_before_QEB_cent", "n_SAB_abgebrochen_cat")))
 ```
 
 
 # Modelle mit Interaktion von QEB_id mit anderen Prädiktoren
 
 ```{r interaction}
+final_data$n_treats <- final_data$n_REHA_abgebrochen + final_data$n_SAB_abgebrochen + final_data$n_QEB_abgebrochen + final_data$n_REHA_regulaer + final_data$n_SAB_regulaer + final_data$n_QEB_regulaer
 
-model13 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + agegroup*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model13)
-add_model_summary(model13, "Model 13") #signifikante Interaktion!
-plot(ggeffects::ggpredict(model13, terms = c("QEB_id_cent", "agegroup")))
-anova(model12, model13, test = "Chisq") #keine Modellverbesserung
+# Vektor der Prädiktoren, die du mit n_treats interagieren willst
+predictors <- c("sex", "age_cent", "nationality", "emp.type", "elix_sum_cent", 
+                "fost.degree_bin", "ndistinctATClevel2_cent")
 
-model14 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + sex*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
-summary(model14)
-add_model_summary(model14, "Model 14") #keine signifikante Interaktion
+# Liste zur Speicherung der Modelle
+models <- list()
 
-model15 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + nationality*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
-summary(model15)
-add_model_summary(model15, "Model 15") #keine signifikante Interaktion
-
-model16 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + emp.type*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)  
-summary(model16)
-add_model_summary(model16, "Model 16") #keine signifikante Interaktion
-
-model17 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + elix_sum_cent*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model17)
-add_model_summary(model17, "Model 17") #keine signifikante Interaktion
-
-model18 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + fost.degree_bin*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model18)
-add_model_summary(model18, "Model 18") #keine signifikante Interaktion
-
-model19 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + ndistinctATClevel2_cent*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model19)
-add_model_summary(model19, "Model 19") #keine signifikante Interaktion
-
-model20 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + REHA_count_before_QEB_cent*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model20)
-add_model_summary(model20, "Model 20") #keine signifikante Interaktion
-
-model21 <- glmmTMB(unpl_drop ~ sex + agegroup + QEB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + REHA_count_before_QEB_cent + SAB_count_before_QEB_cat + SAB_count_before_QEB_cat*QEB_id_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model21)
-add_model_summary(model21, "Model 21") #keine signifikante Interaktion
+# Schleife: Für jeden Prädiktor ein Modell mit Interaktion zu n_treats
+for (pred in predictors) {
+  
+  # Modellformel als String
+  formula_str <- paste0("unpl_drop ~ ", 
+                        paste(setdiff(predictors, pred), collapse = " + "), 
+                        " + ", pred, " * n_treats + (1|pragmaid)")
+  
+  # In Formelobjekt umwandeln
+  f <- as.formula(formula_str)
+  
+  # Modell berechnen
+  model <- glmmTMB(f, family = "binomial", data = final_data)
+  
+  # Modell in Liste speichern
+  models[[paste0("model_", pred)]] <- model
+  
+  # Optional: Zusammenfassung ausgeben
+  cat("\n\n============================\n")
+  cat("Summary for model with interaction:", pred, "\n")
+  print(summary(model))
+}
 ```
 
 #Evaluate model fit 
@@ -1057,7 +1398,7 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
 ## Modellauswahl
 
 ```{r best_model}
-best_model <- model12
+best_model <- model15
 saveRDS(best_model, file = file.path(folder_models, "full_model_QEB.rds"))
 ```
 
@@ -1065,7 +1406,7 @@ saveRDS(best_model, file = file.path(folder_models, "full_model_QEB.rds"))
 ```{r model_iccr2}
 #load the best model (no need to run the model again)
 best_model <- readRDS(file.path(folder_models, "full_model_QEB.rds"))
-#R2 = proportion of the explained variance (of the full model)
+#R2 (conditional) = proportion of the explained variance (of the full model)
 performance::r2_nakagawa(best_model) 
 
 # ICC = proportion of explained variance that can be attributed to the random effects

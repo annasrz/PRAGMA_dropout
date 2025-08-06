@@ -87,7 +87,7 @@ ldf <- lapply(names(ldf), function(df_name) {
       mutate(pragmaid = as.factor(pragmaid))
   }
   
-  if (df_name %in% c("drvreha", "SAB", "QEB")) {
+  if (df_name %in% c("drvreha", "SAB", "QEB", "reha")) {
     
     date_columns <- grep("^date\\.(inpat|qwt|drvreha|reha)\\.(start|end)$", colnames(df), value = TRUE)
     
@@ -300,12 +300,48 @@ ggplot(drvreha_gkvinsured, aes(x = MASSN_ART, fill = unpl_drop)) +
 
 ### REHA_id (Behandlungserfahrung REHA)
 ```{r check_id}
-drvreha_gkvinsured <- drvreha_gkvinsured %>% 
+
+# Merge Data
+# drvreha_gkvinsured_full <- bind_rows(
+#   drvreha_gkvinsured,
+#   reha %>%
+#     filter(source == "gkv") %>%
+#     select(pragmaid, date.treat.start, treatment, date.treat.end))
+
+
+drvreha_gkvinsured <- drvreha_gkvinsured %>%
   group_by(pragmaid) %>%
   arrange(date.treat.start) %>%
-  mutate(reha_id = row_number()-1)
+  mutate(
+    reha_id = if_else(
+      treatment == "drvreha",
+      cumsum(lag(treatment %in% c("drvreha"), default = FALSE)),
+      NA_integer_
+    ),
+    # Zähler: wie viele vorherige drvreha-Behandlungen wurden abgebrochen?
+    n_REHA_abgebrochen = if_else(
+      treatment == "drvreha",
+      cumsum(lag(treatment == "drvreha" & unpl_drop == "ja", default = FALSE)),
+      NA_integer_
+    ),
+    n_REHA_regulaer = if_else(
+      treatment == "drvreha",
+      cumsum(lag(treatment == "drvreha" & unpl_drop == "nein", default = FALSE)),
+      NA_integer_
+    ))
 
-table(drvreha_gkvinsured$reha_id)
+
+#check
+drvreha_gkvinsured %>% select(pragmaid, date.treat.start, date.treat.end, reha_id, treatment, n_REHA_abgebrochen, unpl_drop) %>% arrange(pragmaid, date.treat.start)
+
+table(drvreha_gkvinsured$reha_id, useNA = "always")
+table(drvreha_gkvinsured$n_REHA_abgebrochen, useNA = "always")
+table(drvreha_gkvinsured$n_REHA_regulaer, useNA = "always")
+#table(drvreha_gkvinsured$reha_id, drvreha_gkvinsured_full$n_REHA_abgebrochen, useNA = "always")
+
+# drvreha_gkvinsured_full <- drvreha_gkvinsured_full %>%
+#   filter(treatment == "drvreha")
+
 ```
 
 ### Hinzufügen von ALTER
@@ -326,7 +362,7 @@ missing_rows <- drvreha_gkvinsured %>%
   anti_join(reha_employ, by = c("pragmaid", "reha_id")) 
 missing_rows$ERWERB_V_ANTR
 
-#two cases that are insured but have no valid employment data. add them again to dataset and set employment to "employed" according to ERWERB_V_ANTRAG
+#one case that is insured but have no valid employment data. add them again to dataset and set employment to "employed" according to ERWERB_V_ANTRAG
 reha_employ <- reha_employ %>% bind_rows(missing_rows)
 
 reha_employ <- reha_employ %>%
@@ -525,32 +561,50 @@ med_diagnoses_reha_employ_QEB <- med_diagnoses_reha_employ_QEB %>%
         NA
       }
     }),
-    unpl_within_12m_before = sapply(1:n(), function(i) {
+    n_QEB_abgebrochen = sapply(1:n(), function(i) {
       if (treatment[i] == "drvreha") {
-        any(
-          treatment[1:(i-1)] %in% c("QEB", "drvreha") &
-          unpl_drop[1:(i-1)] == "ja" &
-          date.treat.end[1:(i-1)] >= (date.treat.start[i] - days(365)) &
-          date.treat.end[1:(i-1)] < date.treat.start[i]
-        )
+        sum(treatment[1:(i-1)] == "QEB" & unpl_drop[1:(i-1)] == "ja" & date.treat.end[1:(i-1)] < date.treat.start[i])
       } else {
         NA
       }
     }),
-    unpl_within_12m_before = factor(
-      ifelse(is.na(unpl_within_12m_before), NA_integer_, as.integer(unpl_within_12m_before)),
-      levels = c(0, 1),
-      labels = c("nein", "ja")
-    )
-  )
+    n_QEB_regulaer = sapply(1:n(), function(i) {
+      if (treatment[i] == "drvreha") {
+        sum(treatment[1:(i-1)] == "QEB" & unpl_drop[1:(i-1)] == "nein" & date.treat.end[1:(i-1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    })) %>%
+  ungroup()
+
+  #   unpl_within_12m_before = sapply(1:n(), function(i) {
+  #     if (treatment[i] == "drvreha") {
+  #       any(
+  #         treatment[1:(i-1)] %in% c("QEB", "drvreha") &
+  #         unpl_drop[1:(i-1)] == "ja" &
+  #         date.treat.end[1:(i-1)] >= (date.treat.start[i] - days(365)) &
+  #         date.treat.end[1:(i-1)] < date.treat.start[i]
+  #       )
+  #     } else {
+  #       NA
+  #     }
+  #   }),
+  #   unpl_within_12m_before = factor(
+  #     ifelse(is.na(unpl_within_12m_before), NA_integer_, as.integer(unpl_within_12m_before)),
+  #     levels = c(0, 1),
+  #     labels = c("nein", "ja")
+  #   )
+  # )
 
 
 #check
-med_diagnoses_reha_employ_QEB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, unpl_within_12m_before, unpl_drop) %>% arrange(pragmaid, date.treat.start)
-table(med_diagnoses_reha_employ_QEB$QEB_count_before_reha)
-med_diagnoses_reha_employ_QEB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha) %>% arrange(pragmaid, date.treat.start) #okay
+med_diagnoses_reha_employ_QEB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, n_QEB_abgebrochen, n_REHA_abgebrochen, unpl_drop) %>% arrange(pragmaid, date.treat.start)
+table(med_diagnoses_reha_employ_QEB[med_diagnoses_reha_employ_QEB$treatment == "drvreha",]$QEB_count_before_reha, useNA = "always")
+table(med_diagnoses_reha_employ_QEB[med_diagnoses_reha_employ_QEB$treatment == "drvreha",]$n_QEB_abgebrochen, useNA = "always")
+table(med_diagnoses_reha_employ_QEB[med_diagnoses_reha_employ_QEB$treatment == "drvreha",]$n_QEB_regulaer, useNA = "always")
+
+# med_diagnoses_reha_employ_QEB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha) %>% arrange(pragmaid, date.treat.start) #okay
 med_diagnoses_reha_employ_QEB <- med_diagnoses_reha_employ_QEB %>% filter(treatment == "drvreha")
-table(med_diagnoses_reha_employ_QEB$unpl_within_12m_before)
 ```
 
 ### Hinzufügen der SAB ID (wie viele Stationäre Alkoholbehandlungen hat eine Person zum Zeitpunkt der REHAs bereits gemacht?)
@@ -593,53 +647,85 @@ med_diagnoses_reha_employ_QEB_SAB <- bind_rows(
 
 med_diagnoses_reha_employ_QEB_SAB <- bind_rows(
   med_diagnoses_reha_employ_QEB,
-  SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end, unpl_drop)
-) %>%
+  SAB %>% select(pragmaid, date.treat.start, treatment, date.treat.end, unpl_drop)) %>%
   arrange(pragmaid, date.treat.start) %>%
   group_by(pragmaid) %>%
-  
-  # SAB-Zählung
-  mutate(
+    mutate(
     SAB_count_before_reha = sapply(1:n(), function(i) {
       if (treatment[i] == "drvreha") {
-        sum(treatment[1:(i - 1)] == "SAB" & date.treat.end[1:(i - 1)] < date.treat.start[i])
+        sum(treatment[1:(i-1)] == "SAB" & date.treat.end[1:(i-1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    }),
+    n_SAB_abgebrochen = sapply(1:n(), function(i) {
+      if (treatment[i] == "drvreha") {
+        sum(treatment[1:(i-1)] == "SAB" & unpl_drop[1:(i-1)] == "ja" & date.treat.end[1:(i-1)] < date.treat.start[i])
+      } else {
+        NA
+      }
+    }),
+    n_SAB_regulaer = sapply(1:n(), function(i) {
+      if (treatment[i] == "drvreha") {
+        sum(treatment[1:(i-1)] == "SAB" & unpl_drop[1:(i-1)] == "nein" & date.treat.end[1:(i-1)] < date.treat.start[i])
       } else {
         NA
       }
     })
   ) %>%
-  
-  # Hilfsvariable: SAB-Abbrüche innerhalb der letzten 12 Monate 
-  mutate(
-    sab_unpl_before = sapply(1:n(), function(i) {
-      if (treatment[i] == "drvreha") {
-        any(
-          treatment[1:(i - 1)] == "SAB" &
-            unpl_drop[1:(i - 1)] == "ja" &
-            date.treat.end[1:(i - 1)] >= (date.treat.start[i] - days(365)) &
-            date.treat.end[1:(i - 1)] < date.treat.start[i]
-        )
-      } else {
-        NA
-      }
-    }),
-    
-    # in den kletzten 12 Monaten kein Abbruch ans den vorherigen Treatments (="nein") und jetzt SAB-Abbruch: auf "ja" setzen
-    unpl_within_12m_before = case_when(
-      sab_unpl_before & unpl_within_12m_before == "nein" ~ "ja",
-      TRUE ~ unpl_within_12m_before
-    ),
-    
-    unpl_within_12m_before = factor(unpl_within_12m_before, levels = c("nein", "ja"))
-  ) %>%
-  
   ungroup()
+
+#med_diagnoses_reha_employ_QEB_SAB <- med_diagnoses_reha_employ_QEB_SAB %>% ungroup()
+  # 
+  # 
+  # 
+  # 
+  # 
+  # 
+  # # SAB-Zählung
+  # mutate(
+  #   SAB_count_before_reha = sapply(1:n(), function(i) {
+  #     if (treatment[i] == "drvreha") {
+  #       sum(treatment[1:(i - 1)] == "SAB" & date.treat.end[1:(i - 1)] < date.treat.start[i])
+  #     } else {
+  #       NA
+  #     }
+  #   })
+  # ) %>%
+  # 
+  # # Hilfsvariable: SAB-Abbrüche innerhalb der letzten 12 Monate 
+  # mutate(
+  #   sab_unpl_before = sapply(1:n(), function(i) {
+  #     if (treatment[i] == "drvreha") {
+  #       any(
+  #         treatment[1:(i - 1)] == "SAB" &
+  #           unpl_drop[1:(i - 1)] == "ja" &
+  #           date.treat.end[1:(i - 1)] >= (date.treat.start[i] - days(365)) &
+  #           date.treat.end[1:(i - 1)] < date.treat.start[i]
+  #       )
+  #     } else {
+  #       NA
+  #     }
+  #   }),
+  #   
+  #   # in den kletzten 12 Monaten kein Abbruch ans den vorherigen Treatments (="nein") und jetzt SAB-Abbruch: auf "ja" setzen
+  #   unpl_within_12m_before = case_when(
+  #     sab_unpl_before & unpl_within_12m_before == "nein" ~ "ja",
+  #     TRUE ~ unpl_within_12m_before
+  #   ),
+  #   
+  #   unpl_within_12m_before = factor(unpl_within_12m_before, levels = c("nein", "ja"))
+  # ) %>%
+  # 
+  # ungroup()
 
 #check
 med_diagnoses_reha_employ_QEB_SAB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, SAB_count_before_reha) %>% arrange(pragmaid, date.treat.start)
-med_diagnoses_reha_employ_QEB_SAB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, SAB_count_before_reha, sab_unpl_before, unpl_within_12m_before, unpl_drop) %>% arrange(pragmaid, date.treat.start)
-table(med_diagnoses_reha_employ_QEB_SAB$unpl_within_12m_before)
-table(med_diagnoses_reha_employ_QEB_SAB$sab_unpl_before)
+table(med_diagnoses_reha_employ_QEB_SAB[med_diagnoses_reha_employ_QEB_SAB$treatment == "drvreha",]$SAB_count_before_reha, useNA = "always")
+table(med_diagnoses_reha_employ_QEB_SAB[med_diagnoses_reha_employ_QEB_SAB$treatment == "drvreha",]$n_SAB_abgebrochen, useNA = "always")
+# med_diagnoses_reha_employ_QEB_SAB %>% select(pragmaid, date.treat.start, reha_id, treatment, QEB_count_before_reha, SAB_count_before_reha, sab_unpl_before, unpl_within_12m_before, unpl_drop) %>% arrange(pragmaid, date.treat.start)
+# table(med_diagnoses_reha_employ_QEB_SAB$unpl_within_12m_before)
+# table(med_diagnoses_reha_employ_QEB_SAB$sab_unpl_before)
 med_diagnoses_reha_employ_QEB_SAB <- med_diagnoses_reha_employ_QEB_SAB %>% filter(treatment == "drvreha")
 
 ```
@@ -649,8 +735,9 @@ med_diagnoses_reha_employ_QEB_SAB <- med_diagnoses_reha_employ_QEB_SAB %>% filte
 
 ```{r select_vars}
 reha_final <- med_diagnoses_reha_employ_QEB_SAB  %>% 
-  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, DIAG_VERAEND, nationality, n.days, max_n_days, sab_unpl_before, DAUER_REHA, DIAG1, BEWILLDIAG, date.treat.start, date.treat.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob, ENTLASSFORM, date.emp.start, date.emp.end, id_pragma_reha, treatment))
+  select(-c(source, DIAG_STELLEN, DIAG_ALLES, DIAG_SEITE, DIAG_GRUPPE, DIAG_VERAEND, nationality, n.days, max_n_days, DAUER_REHA, DIAG1, BEWILLDIAG, date.treat.start, date.treat.end, FAMILIE, ERWERB_V_ANTR, STELLUNG_BERUF, LEISTUNGSART, yob, ENTLASSFORM, date.emp.start, date.emp.end, id_pragma_reha, treatment, reha_id, SAB_count_before_reha, QEB_count_before_reha))
 
+reha_final$n_treats <- reha_final$n_REHA_abgebrochen + reha_final$n_SAB_abgebrochen + reha_final$n_QEB_abgebrochen + reha_final$n_REHA_regulaer + reha_final$n_SAB_regulaer + reha_final$n_QEB_regulaer
 ```
 
 ## Zentrieren der kontinuierlichen Variablen
@@ -659,7 +746,7 @@ Alle kontinuierlichen Variablen werden zentriert (d. h. der Mittelwert subtrahie
 
 ```{r centering}  
 
-variables_to_center <- c("age", "reha_id", "elix_sum", "ndistinctATClevel2", "QEB_count_before_reha", "SAB_count_before_reha")
+variables_to_center <- c("age", "elix_sum", "ndistinctATClevel2", "n_SAB_abgebrochen", "n_QEB_abgebrochen", "n_REHA_abgebrochen", "n_SAB_regulaer", "n_QEB_regulaer", "n_REHA_regulaer", "n_treats") 
 
 #centering
 for (var in variables_to_center) {
@@ -671,9 +758,10 @@ for (var in variables_to_center) {
 
 ```{r correlation}
 # correlation matrix
-cor_matrix <-  cor(reha_final %>% select(c("age_cent", "reha_id_cent", "elix_sum_cent", "ndistinctATClevel2_cent", "QEB_count_before_reha_cent", "SAB_count_before_reha_cent")))
-cor_melted <- as.data.frame(as.table(cor_matrix))
+cent_vars <- names(reha_final)[grepl("_cent$", names(reha_final))]
 
+cor_matrix <- cor(reha_final %>% select(all_of(cent_vars)), use = "pairwise.complete.obs")
+cor_melted <- as.data.frame(as.table(cor_matrix))
 # plot as Heatmap
 ggplot(cor_melted, aes(Var1, Var2, fill = Freq)) +
   geom_tile() +
@@ -713,16 +801,16 @@ reha_final <- reha_final %>%
          emp.type = fct_recode(emp.type, "other" = "retired"))
 
 #reha_id
-boxplot(reha_final$reha_id_cent)
+# boxplot(reha_final$reha_id_cent)
 
 #elix_sum
 boxplot(reha_final$elix_sum_cent) 
-
-#QEB_count_before_reha
-boxplot(reha_final$QEB_count_before_reha_cent) 
-
-#SAB_count_before_reha
-boxplot(reha_final$SAB_count_before_reha_cent)
+# 
+# #QEB_count_before_reha
+# boxplot(reha_final$QEB_count_before_reha_cent) 
+# 
+# #SAB_count_before_reha
+# boxplot(reha_final$SAB_count_before_reha_cent)
 
 
 ```
@@ -734,17 +822,23 @@ Relevant ist nur, ob die Interaktionstermine signifikant sind. Jede signifikante
 ```{r linearity_test}
 # Create the interaction terms of the metric predictors with their logarithm
 reha_final$logageInt <- log(reha_final$age+1) * reha_final$age
-reha_final$logreha_idInt <- log(reha_final$reha_id+1) * reha_final$reha_id
+# reha_final$logreha_idInt <- log(reha_final$reha_id+1) * reha_final$reha_id
 reha_final$logelix_sumInt <- log(reha_final$elix_sum+1) * reha_final$elix_sum
 reha_final$logndistinctATClevel2Int <- log(reha_final$ndistinctATClevel2+1) * reha_final$ndistinctATClevel2
-reha_final$logQEB_count_before_rehaInt <- log(reha_final$QEB_count_before_reha+1) * reha_final$QEB_count_before_reha
-reha_final$logSAB_count_before_rehaInt <- log(reha_final$SAB_count_before_reha+1) * reha_final$SAB_count_before_reha
+# reha_final$logQEB_count_before_rehaInt <- log(reha_final$QEB_count_before_reha+1) * reha_final$QEB_count_before_reha
+# reha_final$logSAB_count_before_rehaInt <- log(reha_final$SAB_count_before_reha+1) * reha_final$SAB_count_before_reha
+reha_final$logn_SAB_abgebrochenInt <- log(reha_final$n_SAB_abgebrochen+1) * reha_final$n_SAB_abgebrochen
+reha_final$logn_QEB_abgebrochenInt <- log(reha_final$n_QEB_abgebrochen+1) * reha_final$n_QEB_abgebrochen
+reha_final$logn_REHA_abgebrochenInt <- log(reha_final$n_REHA_abgebrochen+1) * reha_final$n_REHA_abgebrochen
+reha_final$logn_SAB_regulaerInt <- log(reha_final$n_SAB_regulaer+1) * reha_final$n_SAB_regulaer
+reha_final$logn_QEB_regulaerInt <- log(reha_final$n_QEB_regulaer+1) * reha_final$n_QEB_regulaer
+reha_final$logn_REHA_regulaerInt <- log(reha_final$n_REHA_regulaer+1) * reha_final$n_REHA_regulaer
 
 
 outcomes <- c("unpl_drop")
 
 
-predictors <- "sex + STAATS_ANGE + MASSN_ART + emp.type + unpl_within_12m_before + age + logageInt + reha_id + logreha_idInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + QEB_count_before_reha + logQEB_count_before_rehaInt + SAB_count_before_reha + logSAB_count_before_rehaInt"
+predictors <- "sex + STAATS_ANGE + MASSN_ART + emp.type + age + logageInt + elix_sum + logelix_sumInt + ndistinctATClevel2 + logndistinctATClevel2Int + n_SAB_abgebrochen + logn_SAB_abgebrochenInt + n_QEB_abgebrochen + logn_QEB_abgebrochenInt + n_REHA_abgebrochen + logn_REHA_abgebrochenInt + n_SAB_regulaer + logn_SAB_regulaerInt + n_QEB_regulaer + logn_QEB_regulaerInt + n_REHA_regulaer + logn_REHA_regulaerInt"
 
 
 models <- list()
@@ -759,13 +853,92 @@ for (outcome in outcomes) {
 
 ```
 
-Es gibt keine signifikanten Interaktionseffekte, die darauf hindeuten, dass die Annahme der Linearität im Logit verletzt ist. Daher wird keine Transformation der Prädiktoren durchgeführt.
+Es gibt keine signifikanten Interaktionseffekte, die darauf hindeuten, dass die Annahme der Linearität im Logit verletzt ist. Da die counter für Prädiktoren Anzahl vorheriger Behandlungen und Anzahl vorheriger abgerochener Variablen zero-inflated und schief sind, werden diese kategorisiert.
+
+### Kategorisierung von Prädiktoren
+```{r categorization}
+# 
+# #Anzahl vorangeganer SABs
+# table(reha_final$SAB_count_before_reha, useNA = "always")
+# 
+# limits_1 <- quantile(reha_final$SAB_count_before_reha[reha_final$SAB_count_before_reha > 0], probs = c(0.5))
+# 
+# reha_final <- reha_final %>% mutate(
+#   SAB_count_before_reha_cat = case_when(
+#     SAB_count_before_reha == 0 ~ "0",
+#     SAB_count_before_reha <= tertile_limits_1[1] ~ "1",
+#     TRUE ~ "2+") %>% factor(levels = c("0", "1", "2+"))
+# )
+# 
+# # Check
+# table(reha_final$SAB_count_before_reha_cat, reha_final$SAB_count_before_reha, useNA = "always")
+# 
+# #Anzahl abgebrochener SABs
+# table(reha_final$n_SAB_abgebrochen, useNA = "always")
+# 
+# limits_2 <- quantile(reha_final$n_SAB_abgebrochen[reha_final$n_SAB_abgebrochen > 0], probs = c(0.5))
+# 
+# reha_final <- reha_final %>% mutate(
+#   n_SAB_abgebrochen_cat = case_when(
+#     n_SAB_abgebrochen == 0 ~ "0",
+#     n_SAB_abgebrochen <= limits_2[1] ~ "1",
+#     TRUE ~ "2+"
+#   ) %>% factor(levels = c("0", "1", "2+"))
+# )
+# 
+# #Anzahl vorangegangener rehas
+# table(reha_final$reha_id, useNA = "always")
+# limits_3 <- quantile(reha_final$reha_id[reha_final$reha_id > 0], probs = c(0.5))
+# reha_final <- reha_final %>% mutate(
+#   reha_id_cat = case_when(
+#     reha_id == 0 ~ "0",
+#     reha_id <= limits_3[1] ~ "1",
+#     TRUE ~ "2+"
+#   ) %>% factor(levels = c("0", "1", "2+"))
+# )
+# 
+# #Anzahl abgebrochener rehas
+# table(reha_final$n_REHA_abgebrochen, useNA = "always")
+# reha_final <- reha_final %>% mutate(
+#   n_REHA_abgebrochen_cat = case_when(
+#     n_REHA_abgebrochen == 0 ~ "0",
+#     TRUE ~ "1+"
+#   ) %>% factor(levels = c("0", "1+"))
+# )
+# 
+# #Anzahl vorangegangener QEBs
+# table(reha_final$QEB_count_before_reha, useNA = "always")
+# limits_4 <- quantile(reha_final$QEB_count_before_reha[reha_final$QEB_count_before_reha > 0], probs = c(0.5))
+# 
+# reha_final <- reha_final %>% mutate(
+#   QEB_count_before_reha_cat = case_when(
+#     QEB_count_before_reha == 0 ~ "0",
+#     QEB_count_before_reha <= limits_4[1] ~ "1",
+#     TRUE ~ "2+"
+#   ) %>% factor(levels = c("0", "1", "2+"))
+# )
+# 
+# #Anzahl abgebrochener QEBs
+# table(reha_final$n_QEB_abgebrochen, useNA = "always")
+# reha_final <- reha_final %>% mutate(
+#   n_QEB_abgebrochen_cat = case_when(
+#     n_QEB_abgebrochen == 0 ~ "0",
+#     TRUE ~ "1+"
+#   ) %>% factor(levels = c("0", "1+"))
+# )
+# 
+# # Check
+# table(reha_final$n_QEB_abgebrochen_cat, useNA = "always")
+```
+
+
 
 ### Multikollinearität
 
 ```{r multicollinearity}
 
-vif_model <- glm(unpl_drop ~ sex + unpl_within_12m_before +age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent, data = reha_final, family = binomial)
+vif_model <- glm(unpl_drop ~ sex + age_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + n_REHA_abgebrochen_cent+ n_QEB_abgebrochen_cent + n_SAB_abgebrochen_cent
+                 + n_REHA_regulaer_cent + n_QEB_regulaer_cent + n_SAB_regulaer_cent, data = reha_final, family = binomial)
 car::vif(vif_model)
 
 #"A consequence is that when using adjusted adjusted generalized standard error inflation factor (GSIF = GVIF^(1/(2*Df)), we must take the square-root of our rules of thumb for what is a large value – aGSIF values above √2.5 (1.6) may be of concern, and values above √5 or √10 (2.2 or 3.2) are indicative of a more serious problem"
@@ -805,96 +978,123 @@ model3 <- glmmTMB(unpl_drop ~ sex + age_cent + (1|pragmaid), family = "binomial"
 summary(model3)
 add_model_summary(model3, "Model 3")
 
-model4 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + (1|pragmaid), family = "binomial", data = reha_final)
+model4 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model4)
 add_model_summary(model4, "Model 4")
 
-model5 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + (1|pragmaid), family = "binomial", data = reha_final)
+model5 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model5)
 add_model_summary(model5, "Model 5")
 
-model6 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + (1|pragmaid), family = "binomial", data = reha_final)
+model6 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model6) 
 add_model_summary(model6, "Model 6")
 
-model7 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + (1|pragmaid), family = "binomial", data = reha_final)
+model7 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model7)
 add_model_summary(model7, "Model 7")
 
-model8 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = reha_final)
+model8 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = reha_final)
 summary(model8)
 add_model_summary(model8, "Model 8")
 
-model9 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + (1|pragmaid), family = "binomial", data = reha_final) 
+model9 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + (1|pragmaid), family = "binomial", data = reha_final) 
 summary(model9)
 add_model_summary(model9, "Model 9")
 
-model10 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + (1|pragmaid), family = "binomial", data = reha_final) 
+model10 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + (1|pragmaid), family = "binomial", data = reha_final) 
 summary(model10)
 add_model_summary(model10, "Model 10")
 
-model11 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + (1|pragmaid), family = "binomial", data = reha_final) 
+model11 <- glmmTMB(unpl_drop ~ sex + age_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + n_REHA_abgebrochen_cent+ n_SAB_abgebrochen_cent +n_QEB_abgebrochen_cent + 
+                 + n_REHA_regulaer_cent + n_QEB_regulaer_cent + n_SAB_regulaer_cent + (1|pragmaid), family = "binomial", data = reha_final) 
 summary(model11)
 add_model_summary(model11, "Model 11")
-
-model12 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + unpl_within_12m_before + (1|pragmaid), family = "binomial", data = reha_final) 
-summary(model12)
-add_model_summary(model12, "Model 12")
+plot(ggeffects::ggpredict(model11, terms = c("SAB_count_before_reha_cent", "n_SAB_abgebrochen_cent")))
 ```
 
 ## Hinzunahme der Interaktionen mit reha_id
 ```{r interactions}
-model13 <- glmmTMB(unpl_drop ~ sex + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ age_cent*reha_id_cent + (1|pragmaid), family = 
+
+# Vektor der Prädiktoren, die du mit n_treats interagieren willst
+predictors <- c("sex", "age_cent", "STAATS_ANGE", "emp.type", "elix_sum_cent", 
+                "ndistinctATClevel2_cent", "MASSN_ART")
+
+# Liste zur Speicherung der Modelle
+models <- list()
+
+# Schleife: Für jeden Prädiktor ein Modell mit Interaktion zu n_treats
+for (pred in predictors) {
+  
+  # Modellformel als String
+  formula_str <- paste0("unpl_drop ~ ", 
+                        paste(setdiff(predictors, pred), collapse = " + "), 
+                        " + ", pred, " * n_treats + (1|pragmaid)")
+  
+  # In Formelobjekt umwandeln
+  f <- as.formula(formula_str)
+  
+  # Modell berechnen
+  model <- glmmTMB(f, family = "binomial", data = reha_final)
+  
+  # Modell in Liste speichern
+  models[[paste0("model_", pred)]] <- model
+  
+  # Optional: Zusammenfassung ausgeben
+  cat("\n\n============================\n")
+  cat("Summary for model with interaction:", pred, "\n")
+  print(summary(model))
+}
+
+
+
+
+model13 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent + age_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model13)
 add_model_summary(model13, "Model 13") 
 
-model14 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ sex*reha_id_cent + (1|pragmaid), family = 
+model14 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent +  sex*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model14)
 add_model_summary(model14, "Model 14")
 
-model15 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ STAATS_ANGE*reha_id_cent + (1|pragmaid), family = 
+model15 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent +  STAATS_ANGE*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model15)
 add_model_summary(model15, "Model 15")
 
-model16 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ emp.type*reha_id_cent + (1|pragmaid), family = 
+model16 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent +  emp.type*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model16) 
 add_model_summary(model16, "Model 16")
 
-model17 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ emp.type*reha_id_cent + (1|pragmaid), family = 
-                     "binomial", data = reha_final) 
-summary(model17)
-add_model_summary(model17, "Model 17")
+# model17 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ emp.type*reha_id_cent + (1|pragmaid), family = 
+#                      "binomial", data = reha_final) 
+# summary(model17)
+# add_model_summary(model17, "Model 17")
 
-model18 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ elix_sum_cent*reha_id_cent + (1|pragmaid), family = 
+model18 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent +  elix_sum_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model18) 
 add_model_summary(model18, "Model 18")
 
-model19 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ ndistinctATClevel2_cent*reha_id_cent + (1|pragmaid), family = 
+model19 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent +  ndistinctATClevel2_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final) 
 summary(model19) 
 add_model_summary(model19, "Model 19")
 
-model20 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ MASSN_ART*reha_id_cent + (1|pragmaid), family = 
+model20 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent + MASSN_ART*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final)
 summary(model20)
 add_model_summary(model20, "Model 20")
 
-model21 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ QEB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
+model21 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent + QEB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final)
 summary(model21) 
 add_model_summary(model21, "Model 21")
 
-model22 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent +unpl_within_12m_before+ SAB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
-                     "binomial", data = reha_final)
-summary(model22) 
-add_model_summary(model22, "Model 22")
-
-model23 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent + SAB_count_before_reha_cent + SAB_count_before_reha_cent + unpl_within_12m_before*reha_id_cent + (1|pragmaid), family = 
+model22 <- glmmTMB(unpl_drop ~ sex + age_cent + reha_id_cent*n_REHA_abgebrochen_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART + QEB_count_before_reha_cent*n_QEB_abgebrochen_cent + SAB_count_before_reha_cent*n_SAB_abgebrochen_cent + SAB_count_before_reha_cent*reha_id_cent + (1|pragmaid), family = 
                      "binomial", data = reha_final)
 summary(model22) 
 add_model_summary(model22, "Model 22")
@@ -944,7 +1144,7 @@ ggplot(model_summaries_long, aes(x = Model, y = Value, color = Criterion)) +
 ## Modellauswahl
 
 ```{r best_model}
-best_model <- model12
+best_model <- model11
 saveRDS(best_model, file = file.path(folder_models, "full_model_REHA.rds"))
 ```
 ## Model Diagnostik: ICC and R2
@@ -1017,7 +1217,7 @@ prop.table(table(reha_final$emp.type))
 prop.table(table(reha_final$STAATS_ANGE))
 
 #unpl_within_12m_before
-prop.table(table(reha_final$unpl_within_12m_before))
+#prop.table(table(reha_final$unpl_within_12m_before))
 
 #elix_sum
 summary(reha_final$elix_sum)
