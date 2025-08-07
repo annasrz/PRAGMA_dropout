@@ -987,44 +987,44 @@ for (pred in predictors) {
   cat("Summary for model with interaction:", pred, "\n")
   print(summary(model))
 }
-
-
-
-model13 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*age_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model13)
-add_model_summary(model13, "Model 13")
-
-model14 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*sex + (1|pragmaid), family = "binomial", data = final_data) 
-summary(model14)
-add_model_summary(model14, "Model 14") 
-
-model15 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*elix_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model15)
-add_model_summary(model15, "Model 15") 
-
-model16 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*nationality + (1|pragmaid), family = "binomial", data = final_data) 
-summary(model16) 
-add_model_summary(model16, "Model 16") 
-
-model17 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*emp.type + (1|pragmaid), family = "binomial", data = final_data)
-summary(model17) 
-add_model_summary(model17, "Model 17")
-
-model18 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
-summary(model18)
-add_model_summary(model18, "Model 18")
-
-model19 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model19)
-add_model_summary(model19, "Model 19")
-
-model20 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*QEB_count_before_SAB_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model20) 
-add_model_summary(model20, "Model 20")
-
-model21 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*REHA_count_before_SAB_cent + (1|pragmaid), family = "binomial", data = final_data)
-summary(model21) 
-add_model_summary(model21, "Model 21")
+# 
+# 
+# 
+# model13 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*age_cent + (1|pragmaid), family = "binomial", data = final_data)
+# summary(model13)
+# add_model_summary(model13, "Model 13")
+# 
+# model14 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*sex + (1|pragmaid), family = "binomial", data = final_data) 
+# summary(model14)
+# add_model_summary(model14, "Model 14") 
+# 
+# model15 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*elix_sum_cent + (1|pragmaid), family = "binomial", data = final_data)
+# summary(model15)
+# add_model_summary(model15, "Model 15") 
+# 
+# model16 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*nationality + (1|pragmaid), family = "binomial", data = final_data) 
+# summary(model16) 
+# add_model_summary(model16, "Model 16") 
+# 
+# model17 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*emp.type + (1|pragmaid), family = "binomial", data = final_data)
+# summary(model17) 
+# add_model_summary(model17, "Model 17")
+# 
+# model18 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*fost.degree_bin + (1|pragmaid), family = "binomial", data = final_data)
+# summary(model18)
+# add_model_summary(model18, "Model 18")
+# 
+# model19 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*ndistinctATClevel2_cent + (1|pragmaid), family = "binomial", data = final_data)
+# summary(model19)
+# add_model_summary(model19, "Model 19")
+# 
+# model20 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*QEB_count_before_SAB_cent + (1|pragmaid), family = "binomial", data = final_data)
+# summary(model20) 
+# add_model_summary(model20, "Model 20")
+# 
+# model21 <- glmmTMB(unpl_drop ~ sex + age_cent + SAB_id_cent + nationality + emp.type + elix_sum_cent + fost.degree_bin + ndistinctATClevel2_cent + QEB_count_before_SAB_cent + REHA_count_before_SAB_cent + SAB_id_cent*REHA_count_before_SAB_cent + (1|pragmaid), family = "binomial", data = final_data)
+# summary(model21) 
+# add_model_summary(model21, "Model 21")
 ```
 
 ## Evaluation der Modelle
@@ -1085,7 +1085,7 @@ performance::r2_nakagawa(best_model)
 
 # ICC = proportion of explained variance that can be attributed to the random effects
 residual_var <- pi^2 / 3
-random_effects_var <- as.numeric(VarCorr(best_model)$pragmaid[1])
+random_effects_var <- VarCorr(best_model)$cond$pragmaid[1, 1]
 ICC <- random_effects_var / (random_effects_var + residual_var)
 print(ICC) 
 performance::icc(best_model)
