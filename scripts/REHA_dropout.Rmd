@@ -1010,7 +1010,13 @@ model11 <- glmmTMB(unpl_drop ~ sex + age_cent + STAATS_ANGE + emp.type + elix_su
                  + n_REHA_regulaer_cent + n_QEB_regulaer_cent + n_SAB_regulaer_cent + (1|pragmaid), family = "binomial", data = reha_final) 
 summary(model11)
 add_model_summary(model11, "Model 11")
-plot(ggeffects::ggpredict(model11, terms = c("SAB_count_before_reha_cent", "n_SAB_abgebrochen_cent")))
+#plot(ggeffects::ggpredict(model11, terms = c("SAB_count_before_reha_cent", "n_SAB_abgebrochen_cent")))
+
+# model12 <- glmmTMB(unpl_drop ~ sex + age_cent + STAATS_ANGE + emp.type + elix_sum_cent + ndistinctATClevel2_cent + MASSN_ART*emp.type + n_REHA_abgebrochen_cent+ n_SAB_abgebrochen_cent +n_QEB_abgebrochen_cent + 
+#                  + n_REHA_regulaer_cent + n_QEB_regulaer_cent + n_SAB_regulaer_cent + (1|pragmaid), family = "binomial", data = reha_final) 
+# summary(model12)
+
+
 ```
 
 ## Hinzunahme der Interaktionen mit reha_id
@@ -1237,8 +1243,8 @@ summary(reha_final$reha_id)
 #MASSN_ART
 prop.table(table(reha_final$MASSN_ART))
 
-#anzahl distinkter pragmaIDs mit QEB_id > 0 / anzahl aller distinkter pragmaIDs = anteil der patienten mit mehr als einer reha
-(reha_final %>% filter(reha_id > 0) %>% distinct(pragmaid) %>% nrow()) / n_pat 
+#anzahl distinkter pragmaIDs mit reha_id > 0 / anzahl aller distinkter pragmaIDs = anteil der patienten mit mehr als einer reha
+(reha_final %>% filter(n_REHA_abgebrochen > 0 | n_REHA_regulaer) %>% distinct(pragmaid) %>% nrow()) / n_pat 
 #mehr als 2 reha
 (reha_final %>% filter(reha_id > 1) %>% distinct(pragmaid) %>% nrow()) / n_pat
 #mehr als 3 reha
@@ -1249,24 +1255,45 @@ prop.table(table(reha_final$MASSN_ART))
 
 #average number of treatments per patient
 #REHA
-n_treats_reha <- reha_final %>% group_by(pragmaid) %>% summarise(n_treats = n()) %>% pull(n_treats)
+n_treats_reha <- reha_final %>% group_by(pragmaid, unpl_drop) %>% summarise(n_treats = n()) %>% pull(n_treats)
 summary(n_treats_reha)
 
 #SAB
-n_treats_SAB <- reha_final %>%
+# n_treats_SAB <- reha_final %>%
+#   group_by(pragmaid) %>%
+#   slice_max(SAB_count_before_reha, with_ties = FALSE) %>% 
+#   ungroup() %>%
+#   pull(SAB_count_before_reha)
+# summary(n_treats_SAB)
+
+patient_counts <- reha_final %>%
   group_by(pragmaid) %>%
-  slice_max(SAB_count_before_reha, with_ties = FALSE) %>% 
-  ungroup() %>%
-  pull(SAB_count_before_reha)
-summary(n_treats_SAB)
+  summarise(
+    n_irreg_SAB = max(n_SAB_abgebrochen, na.rm = TRUE),
+    n_irreg_QEB = max(n_QEB_abgebrochen, na.rm = TRUE),
+    n_irreg_REHA = max(n_REHA_abgebrochen, na.rm = TRUE),
+    n_reg_SAB = max(n_SAB_regulaer, na.rm = TRUE),
+    n_reg_QEB = max(n_QEB_regulaer, na.rm = TRUE),
+    n_reg_REHA = max(n_REHA_regulaer, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# summary statistics for the number of treatments (mean and IQR 0.25 and 0.75)  
+summary(patient_counts$n_irreg_SAB)
+summary(patient_counts$n_reg_SAB)
+summary(patient_counts$n_irreg_QEB)
+summary(patient_counts$n_reg_QEB)
+summary(patient_counts$n_irreg_REHA)
+summary(patient_counts$n_reg_REHA)
+
 
 #QEB
-n_treats_QEB <- reha_final %>%
-  group_by(pragmaid) %>%
-  slice_max(QEB_count_before_reha, with_ties = FALSE) %>% 
-  ungroup() %>%
-  pull(QEB_count_before_reha)
-summary(n_treats_QEB)
+# n_treats_QEB <- reha_final %>%
+#   group_by(pragmaid) %>%
+#   slice_max(QEB_count_before_reha, with_ties = FALSE) %>% 
+#   ungroup() %>%
+#   pull(QEB_count_before_reha)
+# summary(n_treats_QEB)
 ```
 ## Plot
 
@@ -1274,19 +1301,26 @@ summary(n_treats_QEB)
 new_labels <- c(
   "(Intercept)" = "Intercept", 
   "age_cent" = "Alter",
-  "reha_id_cent" = "Behandlungserfahrung REHA",
+  "n_REHA_abgebrochen_cent" = "vorh. irr. REHA (Anzahl, kont.)",
+  "n_QEB_abgebrochen_cent" = "vorh. irr. QEB (Anzahl, kont.)",
+  "n_SAB_abgebrochen_cent" = "vorh. irr. SAB (Anzahl, kont.)",
+  "n_REHA_regulaer_cent" = "vorh. reg. REHA (Anzahl, kont.)",
+  "n_QEB_regulaer_cent" = "vorh. reg. QEB (Anzahl, kont.)",
+  "n_SAB_regulaer_cent" = "vorh. reg. SAB (Anzahl, kont.)",
+#  "reha_id_cent" = "Behandlungserfahrung REHA",
   "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
   "STAATS_ANGEnicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht-deutsch)",
   "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
   "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
   "elix_sum_cent" = "Elixhauser-Score",
   "ndistinctATClevel2_cent" = "Anzahl Medikationen",
-  "SAB_count_before_reha_cent" = "Behandlungserfahrung SAB",
-  "QEB_count_before_reha_cent" = "Behandlungserfahrung QEB",
-  "unpl_within_12m_beforeja" = "Mind. 1 vorherige irreg. Beendigung\n(Ref.: keine)",
+#  "SAB_count_before_reha_cent" = "Behandlungserfahrung SAB",
+#  "QEB_count_before_reha_cent" = "Behandlungserfahrung QEB",
+#  "unpl_within_12m_beforeja" = "Mind. 1 vorherige irreg. Beendigung\n(Ref.: keine)",
   "MASSN_ARTstationäre Maßnahme" = "Behandlungsart: stationär\n(Ref.: ambulant)",
   "MASSN_ARTganztägig ambulante Maßnahme" = "Behandlungsart: ganztägig ambulant\n(Ref.: ambulant)"
 )
+
 
 
 coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.2, 2), wrap.labels = 100)
@@ -1300,7 +1334,7 @@ coefffix_plot <- coefffix_plot +
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot, width = 7.5, height = 4.5, dpi = 600, bg = "white")
+ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot, width = 8, height = 6.5, dpi = 600, bg = "white")
 # 
 # #same with english labels
 # new_labels_en <- c(
