@@ -1439,6 +1439,10 @@ odds_ratios_df <- data.frame(
   CI_upper = ci_upper,
   p = summary(best_model)$coefficients$cond[, 4]
 )
+
+options(scipen = 999) # disable scientific notation for p-values
+
+
 rownames(odds_ratios_df) <- NULL
 ```
 
@@ -1497,25 +1501,25 @@ summary(final_data$QEB_id)
 (final_data %>% filter(QEB_id > 4) %>% distinct(pragmaid) %>% nrow()) / n_pat
 
 #average number of treatments per patient
-#QEB
-n_treats_QEB <- final_data %>% group_by(pragmaid) %>% summarise(n_treats = n()) %>% pull(n_treats)
-summary(n_treats_QEB)
-
-#REHA
-n_treats_reha <- final_data %>%
+patient_counts <- final_data %>%
   group_by(pragmaid) %>%
-  slice_max(REHA_count_before_QEB, with_ties = FALSE) %>% 
-  ungroup() %>%
-  pull(REHA_count_before_QEB)
-summary(n_treats_reha)
+  summarise(
+    n_irreg_SAB = max(n_SAB_abgebrochen, na.rm = TRUE),
+    n_irreg_QEB = max(n_QEB_abgebrochen, na.rm = TRUE),
+    n_irreg_REHA = max(n_REHA_abgebrochen, na.rm = TRUE),
+    n_reg_SAB = max(n_SAB_regulaer, na.rm = TRUE),
+    n_reg_QEB = max(n_QEB_regulaer, na.rm = TRUE),
+    n_reg_REHA = max(n_REHA_regulaer, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-#SAB
-n_treats_SAB <- final_data %>%
-  group_by(pragmaid) %>%
-  slice_max(SAB_count_before_QEB, with_ties = FALSE) %>% 
-  ungroup() %>%
-  pull(SAB_count_before_QEB)
-summary(n_treats_SAB)
+# summary statistics for the number of treatments (mean and IQR 0.25 and 0.75)  
+summary(patient_counts$n_irreg_SAB)
+summary(patient_counts$n_reg_SAB)
+summary(patient_counts$n_irreg_QEB)
+summary(patient_counts$n_reg_QEB)
+summary(patient_counts$n_irreg_REHA)
+summary(patient_counts$n_reg_REHA)
 
 ```
 
@@ -1525,11 +1529,21 @@ summary(n_treats_SAB)
 
 new_labels <- c(
   "(Intercept)" = "Intercept", 
-  "agegroup35-44" = "Alter: 35-44\n(Ref.: 18-34)",
-  "agegroup45-54" = "Alter: 45-54\n(Ref.: 18-34)",
-  "agegroup55-64" = "Alter: 55-64\n(Ref.: 18-34)",
-  "agegroup65+" = "Alter: 65+\n(Ref.: 18-34)",
-  "QEB_id_cent" = "Behandlungserfahrung QEB",
+  "age_cent" = "Alter",
+  "n_SAB_abgebrochen_cat2+" = "vorh. irr. SAB: 2+ (Ref.: 0)",
+  "n_SAB_abgebrochen_cat1" = "vorh. irr. SAB: 1 (Ref.: 0)",
+  "n_QEB_abgebrochen_cat1" = "vorh. irr. QEB: 1 (Ref.: 0)",
+  "n_QEB_abgebrochen_cat2+" = "vorh. irr. QEB: 2+ (Ref.: 0)",
+  "n_QEB_reg_cat1-2" = "vorh. reg. QEB: 1-2 (Ref.: 0)",
+  "n_QEB_reg_cat3+" = "vorh. reg. QEB: 3+ (Ref.: 0)",
+  "n_REHA_abgebrochen_cent" = "vorh. irr. REHA (Anzahl, kont.)",
+  "n_REHA_regulaer_cent" = "vorh. reg. REHA (Anzahl, kont.)",
+  "n_SAB_regulaer_cent" = "vorh. reg. SAB (Anzahl, kont.)",
+  # "agegroup35-44" = "Alter: 35-44\n(Ref.: 18-34)",
+  # "agegroup45-54" = "Alter: 45-54\n(Ref.: 18-34)",
+  # "agegroup55-64" = "Alter: 55-64\n(Ref.: 18-34)",
+  # "agegroup65+" = "Alter: 65+\n(Ref.: 18-34)",
+ # "QEB_id_cent" = "Behandlungserfahrung QEB",
   "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
   "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht deutsch)",
   "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
@@ -1537,13 +1551,12 @@ new_labels <- c(
   "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
   "elix_sum_cent" = "Elixhauser-Score",
   "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
-  "ndistinctATClevel2_cent" = "Anzahl Medikationen",
-  "SAB_count_before_QEB_cat1" = "Behandlungserfahrung SAB: 1\n(Ref.: 0)",
-  "SAB_count_before_QEB_cat2" = "Behandlungserfahrung SAB: 2\n(Ref.: 0)",
-  "SAB_count_before_QEB_cat3+" = "Behandlungserfahrung SAB: 3+\n(Ref.: 0)",
-  "REHA_count_before_QEB_cent" = "Behandlungserfahrung REHA"
+  "ndistinctATClevel2_cent" = "Anzahl Medikationen"
+ # "SAB_count_before_QEB_cat1" = "Behandlungserfahrung SAB: 1\n(Ref.: 0)",
+ # "SAB_count_before_QEB_cat2" = "Behandlungserfahrung SAB: 2\n(Ref.: 0)",
+  #"SAB_count_before_QEB_cat3+" = "Behandlungserfahrung SAB: 3+\n(Ref.: 0)",
+  #"REHA_count_before_QEB_cent" = "Behandlungserfahrung REHA"
 )
-
 
 coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.values = TRUE, value.offset = .4, value.size = 3.5, dot.size = 2, sort.est = TRUE, axis.labels = new_labels, title = "", color = c("blue", "red"),  axis.lim = c(0.092, 3), wrap.labels = 100)
 
@@ -1556,7 +1569,7 @@ coefffix_plot <- coefffix_plot +
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, width = 8, height = 7, dpi = 600, bg = "white")
+ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, width = 8, height = 6.5, dpi = 600, bg = "white")
 
 
 #same with english labels
