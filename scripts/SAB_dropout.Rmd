@@ -1172,25 +1172,25 @@ summary(final_data$SAB_id)
 (final_data %>% filter(SAB_id > 4) %>% distinct(pragmaid) %>% nrow()) / n_pat
 
 #average number of treatments per patient
-#SAB
-n_treats_SAB <- final_data %>% group_by(pragmaid) %>% summarise(n_treats = n()) %>% pull(n_treats)
-summary(n_treats_SAB)
-
-#REHA
-n_treats_reha <- final_data %>%
+patient_counts <- final_data %>%
   group_by(pragmaid) %>%
-  slice_max(REHA_count_before_SAB, with_ties = FALSE) %>% 
-  ungroup() %>%
-  pull(REHA_count_before_SAB)
-summary(n_treats_reha)
+  summarise(
+    n_irreg_SAB = max(n_SAB_abgebrochen, na.rm = TRUE),
+    n_irreg_QEB = max(n_QEB_abgebrochen, na.rm = TRUE),
+    n_irreg_REHA = max(n_REHA_abgebrochen, na.rm = TRUE),
+    n_reg_SAB = max(n_SAB_regulaer, na.rm = TRUE),
+    n_reg_QEB = max(n_QEB_regulaer, na.rm = TRUE),
+    n_reg_REHA = max(n_REHA_regulaer, na.rm = TRUE),
+    .groups = "drop"
+  )
 
-#QEB
-n_treats_QEB <- final_data %>%
-  group_by(pragmaid) %>%
-  slice_max(QEB_count_before_SAB, with_ties = FALSE) %>% 
-  ungroup() %>%
-  pull(QEB_count_before_SAB)
-summary(n_treats_QEB)
+# summary statistics for the number of treatments (mean and IQR 0.25 and 0.75)  
+summary(patient_counts$n_irreg_SAB)
+summary(patient_counts$n_reg_SAB)
+summary(patient_counts$n_irreg_QEB)
+summary(patient_counts$n_reg_QEB)
+summary(patient_counts$n_irreg_REHA)
+summary(patient_counts$n_reg_REHA)
 
 ```
 ## Plot
@@ -1200,17 +1200,26 @@ summary(n_treats_QEB)
 new_labels <- c(
   "(Intercept)" = "Intercept", 
   "age_cent" = "Alter",
-  "SAB_id_cent" = "Behandlungserfahrung SAB",
+  "n_QEB_abgebrochen_cat1" = "vorh. irr. QEB: 1 (Ref.: 0)",
+  "n_QEB_abgebrochen_cat2+" = "vorh. irr. QEB: 2+ (Ref.: 0)",
+  "n_SAB_abgebrochen_cat2+" = "vorh. irr. SAB: 2+ (Ref.: 0)",
+  "n_SAB_abgebrochen_cat1" = "vorh. irr. SAB: 1 (Ref.: 0)",
+  "n_REHA_abgebrochen_cent" = "vorh. irr. REHA (Anzahl, kont.)",
+  "n_QEB_regulaer_cent" = "vorh. reg. QEB (Anzahl, kont.)",
+  "n_REHA_regulaer_cent" = "vorh. reg. REHA (Anzahl, kont.)",
+  "n_SAB_regulaer_cent" = "vorh. reg. SAB (Anzahl, kont.)",
+  "elix_sum_cat1-3" = "Elixhauser-Score: 1-3 (Ref.: 0)",
+  "elix_sum_cat4+" = "Elixhauser-Score: 4+ (Ref.: 0)",
   "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
   "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht-deutsch)",
   "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
   "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
   "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
-  "elix_sum_cent" = "Elixhauser-Score",
+#  "elix_sum_cent" = "Elixhauser-Score",
   "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
-  "ndistinctATClevel2_cent" = "Anzahl Medikationen",
-  "QEB_count_before_SAB_cent" = "Behandlungserfahrung QEB",
-  "REHA_count_before_SAB_cent" = "Behandlungserfahrung REHA"
+  "ndistinctATClevel2_cent" = "Anzahl Medikationen"
+#  "QEB_count_before_SAB_cent" = "Behandlungserfahrung QEB",
+ # "REHA_count_before_SAB_cent" = "Behandlungserfahrung REHA"
 )
 
 
@@ -1226,7 +1235,7 @@ coefffix_plot <- coefffix_plot +
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_SAB.tif"), coefffix_plot, width = 8, height = 5, dpi = 700, bg = "white")
+ggsave(file.path(folder_plot, "coefffix_plot_SAB.tif"), coefffix_plot, width = 8, height = 6.5, dpi = 700, bg = "white")
 
 #same with english labels
 new_labels_en <- c(
