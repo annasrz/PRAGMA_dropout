@@ -1530,27 +1530,27 @@ summary(patient_counts$n_reg_REHA)
 new_labels <- c(
   "(Intercept)" = "Intercept", 
   "age_cent" = "Alter",
-  "n_SAB_abgebrochen_cat2+" = "vorh. irr. SAB: 2+ (Ref.: 0)",
-  "n_SAB_abgebrochen_cat1" = "vorh. irr. SAB: 1 (Ref.: 0)",
-  "n_QEB_abgebrochen_cat1" = "vorh. irr. QEB: 1 (Ref.: 0)",
-  "n_QEB_abgebrochen_cat2+" = "vorh. irr. QEB: 2+ (Ref.: 0)",
-  "n_QEB_reg_cat1-2" = "vorh. reg. QEB: 1-2 (Ref.: 0)",
-  "n_QEB_reg_cat3+" = "vorh. reg. QEB: 3+ (Ref.: 0)",
-  "n_REHA_abgebrochen_cent" = "vorh. irr. REHA (Anzahl, kont.)",
-  "n_REHA_regulaer_cent" = "vorh. reg. REHA (Anzahl, kont.)",
-  "n_SAB_regulaer_cent" = "vorh. reg. SAB (Anzahl, kont.)",
+  "n_SAB_abgebrochen_cat2+" = "vorherige irregulär beendete SAB: 2+ (Ref.: 0)",
+  "n_SAB_abgebrochen_cat1" = "vorherige irregulär beendete SAB: 1 (Ref.: 0)",
+  "n_QEB_abgebrochen_cat1" = "vorherige irregulär beendete QEB: 1 (Ref.: 0)",
+  "n_QEB_abgebrochen_cat2+" = "vorherige irregulär beendete QEB: 2+ (Ref.: 0)",
+  "n_QEB_reg_cat1-2" = "vorherige regulär beendete QEB: 1-2 (Ref.: 0)",
+  "n_QEB_reg_cat3+" = "vorherige regulär beendete QEB: 3+ (Ref.: 0)",
+  "n_REHA_abgebrochen_cent" = "vorherige irregulär beendete REHA (Anzahl, kont.)",
+  "n_REHA_regulaer_cent" = "vorherige regulär beendete REHA (Anzahl, kont.)",
+  "n_SAB_regulaer_cent" = "vorherige regulär beendete SAB (Anzahl, kont.)",
   # "agegroup35-44" = "Alter: 35-44\n(Ref.: 18-34)",
   # "agegroup45-54" = "Alter: 45-54\n(Ref.: 18-34)",
   # "agegroup55-64" = "Alter: 55-64\n(Ref.: 18-34)",
   # "agegroup65+" = "Alter: 65+\n(Ref.: 18-34)",
  # "QEB_id_cent" = "Behandlungserfahrung QEB",
-  "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
-  "nationalitynicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht deutsch)",
-  "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
-  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
-  "emp.typeretired" = "Beschäftigungsstatus: Rente\n(Ref.: erwerbstätig)",
+  "sexmale" = "Geschlecht: männlich (Ref.: weiblich)",
+  "nationalitynicht deutsch" = "Nationalität: deutsch (Ref.: nicht deutsch)",
+  "emp.typeother" = "Beschäftigungsstatus: andere (Ref.: erwerbstätig)",
+  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos (Ref.: erwerbstätig)",
+  "emp.typeretired" = "Beschäftigungsstatus: Rente (Ref.: erwerbstätig)",
   "elix_sum_cent" = "Elixhauser-Score",
-  "fost.degree_binnein" = "Pflegestatus: nicht vorhanden\n(Ref.: vorhanden)",
+  "fost.degree_binnein" = "Pflegestatus: nicht vorhanden (Ref.: vorhanden)",
   "ndistinctATClevel2_cent" = "Anzahl Medikationen"
  # "SAB_count_before_QEB_cat1" = "Behandlungserfahrung SAB: 1\n(Ref.: 0)",
  # "SAB_count_before_QEB_cat2" = "Behandlungserfahrung SAB: 2\n(Ref.: 0)",
@@ -1562,14 +1562,21 @@ coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.valu
 
 coefffix_plot <- coefffix_plot + 
   theme_minimal() +
-  theme(axis.text.y = element_text(size = 12),
-        plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 11),
+       # plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
         )
   
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, width = 8, height = 6.5, dpi = 600, bg = "white")
+ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot, 
+       width = 175,
+       height = 142, 
+       units = "mm",
+       dpi = 500,
+       bg = "white")
+
 
 
 #same with english labels

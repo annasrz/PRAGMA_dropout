@@ -1301,24 +1301,24 @@ summary(patient_counts$n_reg_REHA)
 new_labels <- c(
   "(Intercept)" = "Intercept", 
   "age_cent" = "Alter",
-  "n_REHA_abgebrochen_cent" = "vorh. irr. REHA (Anzahl, kont.)",
-  "n_QEB_abgebrochen_cent" = "vorh. irr. QEB (Anzahl, kont.)",
-  "n_SAB_abgebrochen_cent" = "vorh. irr. SAB (Anzahl, kont.)",
-  "n_REHA_regulaer_cent" = "vorh. reg. REHA (Anzahl, kont.)",
-  "n_QEB_regulaer_cent" = "vorh. reg. QEB (Anzahl, kont.)",
-  "n_SAB_regulaer_cent" = "vorh. reg. SAB (Anzahl, kont.)",
+  "n_REHA_abgebrochen_cent" = "vorherige irregulär beendete REHA (Anzahl, kont.)",
+  "n_QEB_abgebrochen_cent" = "vorherige irregulär beendete QEB (Anzahl, kont.)",
+  "n_SAB_abgebrochen_cent" = "vorherige irregulär beendete SAB (Anzahl, kont.)",
+  "n_REHA_regulaer_cent" = "vorherige regulär beendete REHA (Anzahl, kont.)",
+  "n_QEB_regulaer_cent" = "vorherige regulär beendete QEB (Anzahl, kont.)",
+  "n_SAB_regulaer_cent" = "vorherige regulär beendete SAB (Anzahl, kont.)",
 #  "reha_id_cent" = "Behandlungserfahrung REHA",
-  "sexmale" = "Geschlecht: männlich\n(Ref.: weiblich)",
-  "STAATS_ANGEnicht deutsch" = "Nationalität: deutsch\n(Ref.: nicht-deutsch)",
-  "emp.typeother" = "Beschäftigungsstatus: andere\n(Ref.: erwerbstätig)",
-  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos\n(Ref.: erwerbstätig)",
+  "sexmale" = "Geschlecht: männlich (Ref.: weiblich)",
+  "STAATS_ANGEnicht deutsch" = "Nationalität: deutsch (Ref.: nicht-deutsch)",
+  "emp.typeother" = "Beschäftigungsstatus: andere (Ref.: erwerbstätig)",
+  "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos (Ref.: erwerbstätig)",
   "elix_sum_cent" = "Elixhauser-Score",
   "ndistinctATClevel2_cent" = "Anzahl Medikationen",
 #  "SAB_count_before_reha_cent" = "Behandlungserfahrung SAB",
 #  "QEB_count_before_reha_cent" = "Behandlungserfahrung QEB",
 #  "unpl_within_12m_beforeja" = "Mind. 1 vorherige irreg. Beendigung\n(Ref.: keine)",
-  "MASSN_ARTstationäre Maßnahme" = "Behandlungsart: stationär\n(Ref.: ambulant)",
-  "MASSN_ARTganztägig ambulante Maßnahme" = "Behandlungsart: ganztägig ambulant\n(Ref.: ambulant)"
+  "MASSN_ARTstationäre Maßnahme" = "Behandlungsart: stationär (Ref.: ambulant)",
+  "MASSN_ARTganztägig ambulante Maßnahme" = "Behandlungsart: ganztägig ambulant (Ref.: ambulant)"
 )
 
 
@@ -1327,14 +1327,20 @@ coefffix_plot <- sjPlot::plot_model(best_model, vline.color = "black", show.valu
 
 coefffix_plot <- coefffix_plot + 
   theme_minimal() +
-  theme(axis.text.y = element_text(size = 12),
-        plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 11),
+       # plot.background = element_rect(colour = "black", fill=NA, linewidth = 1)
         )
   
 coefffix_plot
 
 #save as tif
-ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot, width = 8, height = 6.5, dpi = 600, bg = "white")
+ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot, 
+       width = 175,
+       height = 142, 
+       units = "mm",
+       dpi = 500,
+       bg = "white")
 # 
 # #same with english labels
 # new_labels_en <- c(
