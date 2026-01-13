@@ -1309,7 +1309,7 @@ new_labels <- c(
   "n_SAB_regulaer_cent" = "vorherige regulär beendete SAB (Anzahl, kont.)",
 #  "reha_id_cent" = "Behandlungserfahrung REHA",
   "sexmale" = "Geschlecht: männlich (Ref.: weiblich)",
-  "STAATS_ANGEnicht deutsch" = "Nationalität: deutsch (Ref.: nicht-deutsch)",
+  "STAATS_ANGEnicht deutsch" = "Nationalität: nicht-deutsch (Ref.: deutsch)",
   "emp.typeother" = "Beschäftigungsstatus: andere (Ref.: erwerbstätig)",
   "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos (Ref.: erwerbstätig)",
   "elix_sum_cent" = "Elixhauser-Score",
@@ -1339,7 +1339,7 @@ ggsave(file.path(folder_plot, "coefffix_plot_REHA.tif"), coefffix_plot,
        width = 175,
        height = 142, 
        units = "mm",
-       dpi = 500,
+       dpi = 600,
        bg = "white")
 # 
 # #same with english labels

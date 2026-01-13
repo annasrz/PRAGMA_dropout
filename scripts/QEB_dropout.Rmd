@@ -1545,7 +1545,7 @@ new_labels <- c(
   # "agegroup65+" = "Alter: 65+\n(Ref.: 18-34)",
  # "QEB_id_cent" = "Behandlungserfahrung QEB",
   "sexmale" = "Geschlecht: männlich (Ref.: weiblich)",
-  "nationalitynicht deutsch" = "Nationalität: deutsch (Ref.: nicht deutsch)",
+  "nationalitynicht deutsch" = "Nationalität: nicht-deutsch (Ref.: deutsch)",
   "emp.typeother" = "Beschäftigungsstatus: andere (Ref.: erwerbstätig)",
   "emp.typeunemployed" = "Beschäftigungsstatus: arbeitslos (Ref.: erwerbstätig)",
   "emp.typeretired" = "Beschäftigungsstatus: Rente (Ref.: erwerbstätig)",
@@ -1574,7 +1574,7 @@ ggsave(file.path(folder_plot, "coefffix_plot_QEB.tif"), coefffix_plot,
        width = 175,
        height = 142, 
        units = "mm",
-       dpi = 500,
+       dpi = 600,
        bg = "white")
 
 
